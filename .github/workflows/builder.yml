@@ -1,0 +1,75 @@
+name: Build add-on images
+
+# Builds and pushes the per-architecture add-on images to GHCR using Home Assistant's COMPOSABLE
+# builder actions. The old monolithic `home-assistant/builder` action is deprecated and being removed
+# (it also breaks `@master`), so this uses the replacement `actions/*` from the same repo:
+#   - prepare-multi-arch-matrix: expands the arch list into a build matrix. With image-name
+#     "addon-urmet-callme" and the default registry-prefix (ghcr.io/<owner>), each matrix image is
+#     ghcr.io/a-blaho/<arch>-addon-urmet-callme -- exactly the {arch} placeholder in config.yaml, which
+#     is what the Supervisor pulls. aarch64 builds on a NATIVE ARM runner (no QEMU).
+#   - build-image: builds urmet_callme/Dockerfile with Buildx, adds the io.hass.* labels, and pushes.
+# The image TAG is the add-on version read from config.yaml (the Supervisor pulls image:<that version>),
+# NOT the git tag. Cosign signing is off for now (add `cosign: "true"` + `id-token: write` to enable).
+#
+# LAUNCH: after the first successful run, confirm the images exist and are PUBLIC under
+# ghcr.io/a-blaho/*-addon-urmet-callme, then keep config.yaml `image:` set.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  init:
+    name: Initialize build
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read add-on version (the tag the Supervisor pulls)
+        id: version
+        run: |
+          v=$(grep -E '^version:' urmet_callme/config.yaml | sed -E 's/^version:[[:space:]]*"?([^"]+)"?.*/\1/')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Building version: $v"
+
+      - name: Prepare build matrix
+        id: matrix
+        uses: home-assistant/builder/actions/prepare-multi-arch-matrix@2026.06.0
+        with:
+          architectures: '["amd64", "aarch64"]'
+          image-name: addon-urmet-callme
+
+  build:
+    name: Build ${{ matrix.arch }}
+    needs: init
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read # check out the code
+      packages: write # push images to GHCR
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.init.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and push ${{ matrix.arch }}
+        uses: home-assistant/builder/actions/build-image@2026.06.0
+        with:
+          arch: ${{ matrix.arch }}
+          image: ${{ matrix.image }}
+          context: urmet_callme
+          image-tags: |
+            ${{ needs.init.outputs.version }}
+            latest
+          version: ${{ needs.init.outputs.version }}
+          push: "true"
+          cosign: "false"
+          container-registry-password: ${{ secrets.GITHUB_TOKEN }}

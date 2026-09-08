@@ -1,0 +1,70 @@
+#!/bin/sh
+# go2rtc exec source target. go2rtc runs this on the first viewer of a camera stream and kills
+# it when idle. It (1) asks the control plane to place the call for this camera (recv answers and
+# taps the raw H.264 + PCM audio to FIFOs), (2) muxes them to go2rtc's {output} RTSP -- video
+# RE-ENCODED to a clean CFR stream (see below; NOT copied), audio normalized + encoded to Opus/AAC,
+# and (3) on exit, calls /hangup so the control plane ends the call (recv sends an in-dialog BYE).
+#
+#   $1 = camera index    $2 = {output} RTSP url provided by go2rtc    $3 = control port (optional)
+CAM="$1"
+OUTPUT="$2"
+FIFO="/tmp/urmet_cam_${CAM}.h264"     # per-camera video FIFO (matches recv's RECV_H264_OUT)
+AFIFO="/tmp/urmet_cam_${CAM}.pcm"     # per-camera audio FIFO  (matches recv's RECV_AUDIO_OUT)
+# Control endpoint port. The 2Voice service passes an ephemeral port as $3 (to dodge a host-network
+# clash with e.g. Zigbee2MQTT on 8099); the IPERCOM service omits it and uses the env/default.
+CALL_PORT="${3:-${CALL_PORT:-8099}}"
+
+# Place the call; recv (already registered) answers and starts tapping. Synchronous so that if the
+# control plane rejects the request (`curl -f` fails) we exit BEFORE ffmpeg instead of waiting
+# forever on an empty FIFO. The control plane serves ONE camera at a time: a /call while another
+# camera holds the slot either actively switches to this one or (during the ping-pong debounce)
+# returns 503 -> curl -f fails -> we exit and go2rtc shows the stream as unavailable.
+if ! curl -fsS -m 20 "http://127.0.0.1:${CALL_PORT}/call?cam=${CAM}" >/dev/null 2>&1; then
+  echo "urmet: camera ${CAM} not available (panel busy with another camera?)" >&2
+  exit 1
+fi
+
+# Video: RE-ENCODE to a constant-framerate stream. The panel's H.264 is small (CIF 352x288,
+# ~200 kbps, mostly P-frames with an IDR ~every 0.7-2 s). The problem with passing it through
+# (`-c:v copy`) is TIMING: raw Annex-B carries no timestamps, so stamping by arrival wall-clock
+# produces NON-MONOTONIC DTS out of go2rtc (frames read in bursts get tied/roll-back
+# stamps). Consumers then DROP most frames to keep a monotonic timeline (e.g. ~17 fps arriving
+# at go2rtc but only ~7 fps surviving to an ffmpeg consumer, and far fewer to a browser) -- the
+# "very low framerate" symptom. Copy can't fix this cleanly (a fixed input `-r` would desync from
+# the real-time audio). So decode and re-encode with a real-time reference (wall-clock input PTS)
+# and `-vsync cfr`: libx264 emits clean, monotonic, evenly-paced timestamps at a true CFR, staying
+# anchored to the real-time (audio) timeline. This also yields a proper GOP (small P-frames +
+# periodic keyframe) that go2rtc/WebRTC CAN adapt down on a constrained link -- so it fixes the
+# cellular stutter too. Re-encoding CIF is cheap: at CIF with veryfast + CRF 20 + a 1.5 Mbps
+# ceiling the picture is clean and CPU is light. `-tune zerolatency` keeps latency low; baseline +
+# yuv420p keep it WebRTC-friendly.
+# Audio: the panel's PCM arrives at recv in bursts/gaps (recv drops buffers under back-pressure).
+# We NORMALIZE it (`aresample=async=1`: continuous output, gaps filled with silence, drift
+# corrected) and wall-clock it so it shares the video's real-time reference -- otherwise WebRTC
+# audio glitches on the gaps. Encode to BOTH Opus (WebRTC-native: WebRTC only allows
+# Opus/PCMU/PCMA and go2rtc will NOT auto-transcode AAC -> without Opus, WebRTC is SILENT) and AAC
+# (kept for an MSE fallback). filter_complex resamples once then asplit's to both encoders, so
+# neither is a lossy re-transcode of the other. recv forces G.711 -> PCM is ALWAYS 8 kHz mono
+# s16le (hardcode; raw s16le has no header).
+# streams: 0 = H.264 (re-encoded, CFR 25), 1 = AAC, 2 = Opus.
+# -analyzeduration 0 -probesize 32k: don't spend the default ~5s analyzing the H.264 input before
+# announcing the output track. recv feeds a continuous black keyframe stream from call-start (see
+# recv.c g_black), so ffmpeg has a stream immediately; without these flags it still waits out
+# analyzeduration (~5s) and the on-demand WebRTC negotiation locks in a trackless black session.
+# With them, ffmpeg advertises the video track within a fraction of a second of the first frame.
+ffmpeg -hide_banner -loglevel warning \
+  -analyzeduration 0 -probesize 32768 \
+  -use_wallclock_as_timestamps 1 -f h264 -i "$FIFO" \
+  -use_wallclock_as_timestamps 1 -f s16le -ar 8000 -ac 1 -i "$AFIFO" \
+  -filter_complex "[1:a]aresample=async=1,asplit=2[a0][a1]" \
+  -map 0:v -map "[a0]" -map "[a1]" \
+  -c:v libx264 -preset veryfast -tune zerolatency -profile:v baseline -pix_fmt yuv420p \
+    -vsync cfr -r 25 -g 50 -crf 20 -maxrate 1500k -bufsize 1500k \
+  -c:a:0 aac -c:a:1 libopus -ar 48000 -ac 1 -b:a 64k \
+  -rtsp_transport tcp -f rtsp "$OUTPUT" &
+FF=$!
+trap 'kill "$FF" 2>/dev/null' INT TERM
+wait "$FF" 2>/dev/null
+
+# Viewer gone (ffmpeg exited or go2rtc killed us): end the call at the gateway.
+curl -fsS "http://127.0.0.1:${CALL_PORT}/hangup?cam=${CAM}" >/dev/null 2>&1 || true

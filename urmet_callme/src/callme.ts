@@ -1,0 +1,417 @@
+// High-level Urmet CallMe (Ipercom) client: login -> SIP account -> devices ->
+// register -> resolve gateway -> list entrances -> open. All dynamic; nothing hardcoded.
+import { Cloud, InstanceAccount, NO_ACCOUNT, PlaceData } from "./cloud.js";
+import { logger, redact } from "./logger.js";
+import { buildBody, randId } from "./query.js";
+import { SipClient, callerName } from "./sipClient.js";
+
+const log = logger("callme");
+
+/** Device family, derived from the raw get_my_devices `uid_type` MODEL code. IPERCOM opens doors
+ *  with a cloud open_door_req (pure-Node); 2Voice opens with an in-call DTMF tone (the liblinphone
+ *  `opendoor` path). */
+export type Family = "ipercom" | "twovoice" | "unknown";
+export function familyOf(uidType: string): Family {
+  const u = (uidType || "").toLowerCase();
+  if (u === "1060") return "ipercom";
+  if (u === "1083/83" || u.startsWith("1760/")) return "twovoice";
+  return "unknown";
+}
+
+/** Options for a device (camera) call/cancel request. */
+interface DeviceCallOpts {
+  topologicalCode: string;
+  vdsTypes?: string;
+  displayName?: string;
+  callType?: string;
+  /** Route the panel's INVITE to a DIFFERENT account (the split-account trick) for this call
+   *  only, without mutating this.responseUri (which door-open replies still need). */
+  responseUri?: string;
+}
+
+export interface Door {
+  placeId: string;
+  doorId: number;
+  name: string;
+  hasDoor: boolean;
+  hasGate: boolean;
+  topology: string;
+}
+
+export interface AvailableDevice {
+  name: string;
+  callType: string; // "calling_station" = camera, "intercom", ...
+  topologicalCode: string;
+  vdsTypes: string;
+  sipDestination: string;
+}
+
+export class Place {
+  channel: number;
+  incomingUser: string; // INCOMING/channel account username (doorbell calls arrive here)
+  incomingPw: string; // token password / INCOMING credentials ("" when absent)
+  outgoingUser: string; // gateway-query target (OUTGOING)
+  outgoingPw: string; // OUTGOING account password ("" when absent; needed for the 2Voice path)
+  id: string;
+  name: string;
+  uidType: string; // raw device model code from get_my_devices ("1060" = IPERCOM, "1760/16" = 2Voice)
+  constructor(
+    d: PlaceData,
+    public realm: string,
+  ) {
+    this.channel = parseInt(d.channel_number, 10);
+    this.incomingUser = d.channel_id || "";
+    // "*" is the cloud's "no account here" placeholder - treat it as absent, not a password.
+    this.incomingPw =
+      d.credentials && d.credentials !== NO_ACCOUNT ? d.credentials : "";
+    this.outgoingUser = d.out_credentials_username || "";
+    this.outgoingPw =
+      d.out_credentials_password && d.out_credentials_password !== NO_ACCOUNT
+        ? d.out_credentials_password
+        : "";
+    // Display name precedence: relation_name -> device_name -> "APT-<channel>".
+    this.name = d.relation_name || d.device_name || `APT-${d.channel_number}`;
+    this.uidType = d.uid_type || "";
+    this.id = `${d.device_uid || d.Mac_Address}-${d.channel_number}`;
+  }
+  get outgoingUri() {
+    return `sip:${this.outgoingUser}@${this.realm}`;
+  }
+  /** Device family (ipercom / twovoice / unknown), from uid_type. Selects the door-open path. */
+  get family(): Family {
+    return familyOf(this.uidType);
+  }
+}
+
+export interface DoorbellRing {
+  placeId: string;
+  from: string; // raw From header of the panel's INVITE
+  caller: string; // human-readable caller (name/uri)
+}
+
+export class CallMe {
+  instance!: InstanceAccount;
+  realm!: string;
+  places: Place[] = [];
+  sip!: SipClient;
+  responseUri!: string;
+  private gateways = new Map<string, string>();
+  private doorbellClients: { sip: SipClient; place: Place }[] = [];
+
+  constructor(
+    private email: string,
+    private password: string,
+  ) {}
+
+  async connect(): Promise<this> {
+    log.info(`connecting: cloud login as ${this.email}`);
+    const cloud = new Cloud();
+    await cloud.login(this.email, this.password);
+    log.info("cloud login OK; fetching SIP account (sipdata)");
+    this.instance = await cloud.sipAccount();
+    this.realm = this.instance.realm;
+    log.info(
+      `SIP account = ${this.instance.username} (pw ${redact(this.instance.password)}) realm ${this.realm}`,
+    );
+    const data = await cloud.getMyDevices();
+    if (!data.length) throw new Error("no places on this account");
+    this.places = data.map((d) => new Place(d, this.realm));
+    log.info(
+      `get_my_devices: ${this.places.length} place(s): ${this.places.map((p) => `${p.id}(${p.name})`).join(", ")}`,
+    );
+    // Surface each device's model code. The raw uid_type is a numeric model (e.g. "1060",
+    // "1760_16"), logged as-is rather than classified. For an unfamiliar model, set log_level:
+    // debug and inspect the "device shape (redacted)" line above (secrets are masked) to assess
+    // support.
+    for (const p of this.places) {
+      log.info(
+        `device ${p.id} (${p.name || "?"}): uid_type=${p.uidType || "(none)"}`,
+      );
+    }
+    await this.connectSip();
+    return this;
+  }
+
+  /** SIP register. */
+  async connectSip(): Promise<void> {
+    this.responseUri = `sip:${this.instance.username}@${this.realm}`;
+    // On a reconnect this replaces this.sip; close the old socket first so a half-open
+    // connection from a prior drop isn't leaked.
+    this.sip?.close();
+    this.sip = new SipClient(
+      this.realm,
+      5061,
+      this.instance.username,
+      this.instance.password,
+      this.realm,
+      "tls",
+    );
+    await this.sip.connect();
+    const st = await this.sip.register();
+    if (st !== 200) throw new Error(`SIP registration failed (${st})`);
+    log.info(`SIP registered as ${this.instance.username} (200 OK)`);
+  }
+
+  close() {
+    this.sip?.close();
+    for (const c of this.doorbellClients) c.sip.close();
+  }
+
+  /** Register the INCOMING/channel account of each place on its own connection and fire
+   *  `onRing` when the entrance panel calls it (a doorbell ring). Only fires when the
+   *  monitor is set to "remote" - that's when the panel forwards the call to the account.
+   *  We ring but never answer (no media) and never decline, so the phone is undisturbed. */
+  async startDoorbell(onRing: (r: DoorbellRing) => void): Promise<void> {
+    for (const place of this.places) {
+      if (!place.incomingUser || !place.incomingPw) {
+        log.warn(
+          `place ${place.id} has no channel account; doorbell unavailable`,
+        );
+        continue;
+      }
+      const sip = new SipClient(
+        this.realm,
+        5061,
+        place.incomingUser,
+        place.incomingPw,
+        this.realm,
+        "tls",
+      );
+      sip.onInvite = ({ headers, callId }) => {
+        const from = headers["from"] || "";
+        const caller = callerName(from);
+        log.info(
+          `DOORBELL RING on place ${place.id}: ${caller} (call ${callId})`,
+        );
+        try {
+          onRing({ placeId: place.id, from, caller });
+        } catch (e) {
+          log.error(`doorbell handler error: ${(e as Error).message}`);
+        }
+      };
+      try {
+        await sip.connect();
+        const st = await sip.register();
+        if (st !== 200) {
+          log.warn(
+            `doorbell listener register failed for ${place.incomingUser} (${st})`,
+          );
+          sip.close();
+          continue;
+        }
+        log.info(
+          `doorbell listener registered as ${place.incomingUser} (place ${place.id})`,
+        );
+        this.doorbellClients.push({ sip, place });
+      } catch (e) {
+        log.warn(
+          `doorbell listener setup failed for place ${place.id}: ${(e as Error).message}`,
+        );
+      }
+    }
+  }
+
+  /** Keepalive / re-register the doorbell listeners; call from the maintenance loop. Each listener
+   *  refreshes on its OWN granted expiry (dueForReregister), so a capped lifetime can't lapse it. */
+  async maintainDoorbell(): Promise<void> {
+    for (const { sip } of this.doorbellClients) {
+      try {
+        if (!sip.alive()) {
+          await sip.connect();
+          await sip.register();
+        } else if (sip.dueForReregister()) {
+          await sip.register();
+        }
+      } catch {
+        /* retry next tick */
+      }
+    }
+  }
+
+  private place(id?: string): Place {
+    if (!id) return this.places[0];
+    const p = this.places.find((x) => x.id === id);
+    if (!p) throw new Error(`unknown place ${id}`);
+    return p;
+  }
+
+  private async query(
+    destUri: string,
+    typeReq: string,
+    place: Place,
+    extra?: Record<string, unknown>,
+    timeoutMs = 15000,
+  ): Promise<any> {
+    const body = buildBody({
+      typeReq,
+      channel: place.channel,
+      responseUri: this.responseUri,
+      tokenPassword: place.incomingPw,
+      extra,
+    });
+    const { status, reply } = await this.sip.sendCallme(
+      destUri,
+      body,
+      true,
+      timeoutMs,
+    );
+    if (status < 200 || status >= 300)
+      throw new Error(`${typeReq}: SIP send status ${status}`);
+    return reply;
+  }
+
+  async resolveGateway(placeId?: string, force = false): Promise<string> {
+    const place = this.place(placeId);
+    if (!force && this.gateways.has(place.id))
+      return this.gateways.get(place.id)!;
+    const reply = await this.query(
+      place.outgoingUri,
+      "get_gateway_sip_address_req",
+      place,
+    );
+    if (!reply?.sip_address)
+      throw new Error(`gateway resolution failed: ${JSON.stringify(reply)}`);
+    const gw = "sip:" + reply.sip_address;
+    this.gateways.set(place.id, gw);
+    // `alive` (defaults true when absent) is the panel's own reachability flag; false normally
+    // means the place is unreachable. We still try (the flag is occasionally stale and a real open
+    // may succeed) but warn loudly so a black/timed-out open has an explanation.
+    if (reply.alive === false)
+      log.warn(
+        `gateway(${place.id}) reports alive=false - the entrance panel may be offline; open may fail`,
+      );
+    log.info(
+      `gateway(${place.id}) resolved = ${reply.sip_address} (alive=${reply.alive})`,
+    );
+    return gw;
+  }
+
+  async listDoors(placeId?: string): Promise<Door[]> {
+    const place = this.place(placeId);
+    const gw = await this.resolveGateway(placeId);
+    const reply = await this.query(gw, "configuration_read_req", place, {
+      data: { request: [{ id: randId(), type: "residentDoors" }] },
+    });
+    if (reply?.result !== 0)
+      throw new Error(`list_doors failed: ${JSON.stringify(reply)}`);
+    const doors: Door[] = [];
+    for (const item of reply.data?.response ?? []) {
+      if (item.type !== "residentDoors") continue;
+      const inner =
+        typeof item.response === "string"
+          ? JSON.parse(item.response)
+          : item.response;
+      for (const d of inner) {
+        doors.push({
+          placeId: place.id,
+          doorId: d.id,
+          name: d.device_name,
+          hasDoor: !!d.door_name,
+          hasGate: !!d.gate_name,
+          topology: d.device_topology || "",
+        });
+      }
+    }
+    return doors;
+  }
+
+  /** List the place's callable devices (cameras, intercoms) via get_available_devices_req.
+   *  Cameras have call_type "calling_station" and carry the vds_types that call_device_req
+   *  needs to make the panel actually stream video. */
+  async listDevices(placeId?: string): Promise<AvailableDevice[]> {
+    const place = this.place(placeId);
+    const gw = await this.resolveGateway(placeId);
+    const reply = await this.query(gw, "get_available_devices_req", place);
+    const raw: any[] = reply?.devices ?? [];
+    return raw.map((d) => ({
+      name: d.name ?? "",
+      callType: d.call_type ?? "",
+      topologicalCode: d.topological_code ?? "",
+      vdsTypes: d.vds_types ?? "",
+      sipDestination: d.sip_destination ?? "",
+    }));
+  }
+
+  /** Ask an entrance panel to call us back for monitoring. The panel then sends an INVITE
+   *  to our INSTANCE URI whose SDP offer carries the cloud RTP relay. To get VIDEO (not just
+   *  audio) the request must carry the camera's vds_types + topological_code.
+   *  Signaling only - media is handled by MediaRelay. Returns the MESSAGE send status. */
+  async callDevice(opts: DeviceCallOpts, placeId?: string): Promise<number> {
+    return this.deviceCall("call_device_req", opts, placeId);
+  }
+
+  /** End a monitoring call via a gateway `cancel_call_req` whose body is IDENTICAL to the
+   *  `call_device_req` that started the call (same call_type/topological_code/vds_types/uri_to_call),
+   *  only the type differs. Used as a fallback for a call that never established a SIP dialog to BYE;
+   *  without a teardown the door station can hold that camera's channel "busy" until its own session
+   *  timer, which makes rapid re-views fail. */
+  async cancelCall(opts: DeviceCallOpts, placeId?: string): Promise<number> {
+    return this.deviceCall("cancel_call_req", opts, placeId);
+  }
+
+  private async deviceCall(
+    typeReq: "call_device_req" | "cancel_call_req",
+    opts: DeviceCallOpts,
+    placeId?: string,
+  ): Promise<number> {
+    const place = this.place(placeId);
+    const gw = await this.resolveGateway(placeId);
+    const target = opts.responseUri ?? this.responseUri;
+    const body = buildBody({
+      typeReq,
+      channel: place.channel,
+      responseUri: target,
+      tokenPassword: place.incomingPw,
+      extra: {
+        call_type: opts.callType ?? "calling_station",
+        display_name: opts.displayName ?? "HomeAssistant",
+        topological_code: opts.topologicalCode,
+        uri_to_call: target,
+        vds_types: opts.vdsTypes ?? "",
+      },
+    });
+    log.info(`${typeReq} -> ${gw}: ${JSON.stringify(body)}`);
+    // Reply (for call_device_req) is the panel's INVITE, not a correlated MESSAGE, so don't
+    // wait for one - just confirm the send.
+    const { status } = await this.sip.sendCallme(gw, body, false);
+    if (status < 200 || status >= 300)
+      throw new Error(`${typeReq}: SIP send status ${status}`);
+    return status;
+  }
+
+  /** Open a door/gate. doorType: 'door' | 'gate'. Retries once with a fresh gateway. */
+  async open(
+    doorId: number,
+    doorType: "door" | "gate" = "door",
+    placeId?: string,
+    retry = true,
+  ): Promise<any> {
+    const place = this.place(placeId);
+    let gw = await this.resolveGateway(placeId);
+    let reply: any;
+    try {
+      reply = await this.query(gw, "open_door_req", place, {
+        door_id: doorId,
+        door_type: doorType,
+      });
+    } catch (e) {
+      if (!retry) throw e;
+      gw = await this.resolveGateway(placeId, true);
+      reply = await this.query(gw, "open_door_req", place, {
+        door_id: doorId,
+        door_type: doorType,
+      });
+    }
+    if (reply?.result !== 0) {
+      if (retry) {
+        await this.resolveGateway(placeId, true);
+        return this.open(doorId, doorType, placeId, false);
+      }
+      throw new Error(`open failed: ${JSON.stringify(reply)}`);
+    }
+    log.info(
+      `opened ${doorType} door_id=${doorId} on place ${place.id}: result=${reply.result}`,
+    );
+    return reply;
+  }
+}

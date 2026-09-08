@@ -1,0 +1,54 @@
+name: Urmet CallMe (Unofficial)
+version: "1.0.0"
+slug: urmet_callme
+description: Control your Urmet intercom from Home Assistant
+url: "https://github.com/a-blaho/ha-urmet-callme"
+image: "ghcr.io/a-blaho/{arch}-addon-urmet-callme"
+arch:
+  - aarch64
+  - amd64
+startup: application
+boot: auto
+# Ingress: serves the go2rtc camera UI when video is on (blank otherwise) through HA's authenticated
+# proxy (src/ingress.ts binds INGRESS_PORT on 0.0.0.0). Also raises the security rating. panel_* add a
+# sidebar entry.
+ingress: true
+ingress_port: 8098
+panel_icon: mdi:door-open
+panel_title: Urmet CallMe
+# init: true so tini is PID 1 and reaps the ffmpeg/go2rtc/stream.sh grandchildren we spawn (the image
+# uses a plain debian base, not an S6 base, so we need the Supervisor's init).
+init: true
+# Host networking so go2rtc sees the real LAN interface and advertises a REACHABLE WebRTC ICE
+# candidate for video, giving the low-latency direct-UDP path. In bridge mode the WebRTC media has to
+# traverse Docker NAT and frequently falls back to laggy TCP. Video-only concern; door-open/doorbell
+# don't need it. go2rtc binds its ports (1984/8554/8555) directly on the host, so no `ports:` mapping
+# is declared (under host networking it would be ignored and only render a non-functional Network tab).
+host_network: true
+services:
+  - mqtt:need
+options:
+  email: ""
+  password: ""
+  doorbell: true
+  video: false
+  go2rtc_api_port: 1984
+  go2rtc_rtsp_port: 8554
+  go2rtc_webrtc_port: 8555
+  door_open_2voice_keepalive: 4
+  door_open_2voice_prewarm_hold: 15
+  log_level: info
+schema:
+  email: str
+  password: password
+  doorbell: bool
+  video: bool
+  go2rtc_api_port: "int(1,65535)?"
+  go2rtc_rtsp_port: "int(1,65535)?"
+  go2rtc_webrtc_port: "int(1,65535)?"
+  door_open_2voice_keepalive: "int(0,60)?"
+  door_open_2voice_prewarm_hold: "int(1,60)?"
+  log_level: "list(debug|info|warn|error)?"
+  mqtt_url: "str?"
+  mqtt_username: "str?"
+  mqtt_password: "password?"

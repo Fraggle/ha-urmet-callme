@@ -1,0 +1,50 @@
+configuration:
+  email:
+    name: Urmet email
+    description: The email address you sign in to the official Urmet CallMe app with.
+  password:
+    name: Urmet password
+    description: The password for your Urmet CallMe account.
+  doorbell:
+    name: Doorbell events
+    description: >-
+      Expose a doorbell event entity per panel that fires when it rings. Requires the indoor monitor
+      set to "remote" so the panel forwards the ring.
+  video:
+    name: Entrance camera video
+    description: >-
+      Stream the entrance cameras into Home Assistant (viewed with the WebRTC Camera card). Uses a
+      heavier image and more resources; leave off if you only want door-open and doorbell.
+  go2rtc_api_port:
+    name: go2rtc API port
+    description: >-
+      Port for the embedded go2rtc API / web UI (video only, default 1984). Change it only if you run
+      your own separate go2rtc add-on that already uses this port.
+  go2rtc_rtsp_port:
+    name: go2rtc RTSP port
+    description: Port for the embedded go2rtc RTSP server (video only, default 8554).
+  go2rtc_webrtc_port:
+    name: go2rtc WebRTC port
+    description: Port for the embedded go2rtc WebRTC endpoint (video only, default 8555).
+  door_open_2voice_keepalive:
+    name: 2Voice keep-alive (seconds)
+    description: >-
+      After an unlock, keep the call open this long so a follow-up (e.g. door then gate) is instant.
+      0 places a fresh call for each press.
+  door_open_2voice_prewarm_hold:
+    name: 2Voice pre-warm hold (seconds)
+    description: >-
+      How long a "ready" (pre-warm) button press keeps the call open, so a following door/gate press
+      is instant. Longer keeps the 2Voice line engaged for longer.
+  log_level:
+    name: Log level
+    description: How much detail to log (debug, info, warn, error).
+  mqtt_url:
+    name: MQTT URL (optional)
+    description: Override the MQTT broker URL. Leave empty to use the Home Assistant MQTT service automatically.
+  mqtt_username:
+    name: MQTT username (optional)
+    description: MQTT username, if you are not using the Home Assistant MQTT service.
+  mqtt_password:
+    name: MQTT password (optional)
+    description: MQTT password, if you are not using the Home Assistant MQTT service.

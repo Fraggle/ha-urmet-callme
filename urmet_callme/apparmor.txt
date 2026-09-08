@@ -1,0 +1,38 @@
+#include <tunables/global>
+
+# AppArmor profile for the Urmet CallMe add-on. The profile name MUST match the add-on slug.
+# The image is a plain Debian base with tini as init (config.yaml init: true). The control plane is
+# Node.js, which spawns ffmpeg, go2rtc and the liblinphone helpers (recv, opendoor). Those children
+# run under this same profile (ix = inherit), so the confinement applies to the whole process tree.
+# It is intentionally permissive on files/network/capabilities (the add-on needs outbound TLS/SIP,
+# MQTT, and host-network media ports) while still denying mount, pivot_root, ptrace of other profiles
+# and raw disk access. To disable it, set `apparmor: false` in config.yaml.
+profile urmet_callme flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+
+  file,
+  # SIP/TLS to the Urmet cloud, MQTT to the broker, and (video) go2rtc/WebRTC on the host network.
+  network,
+  # The control plane signals its recv/opendoor children (SIGUSR1 to switch/close, SIGTERM to stop).
+  signal,
+  capability,
+
+  # Init (tini) + system binaries, run under this profile (inherit).
+  /init rix,
+  /bin/** ix,
+  /sbin/** ix,
+  /usr/bin/** ix,
+  /usr/sbin/** ix,
+  /usr/local/bin/** ix,
+  /run/** rwk,
+  /tmp/** rwk,
+
+  # Add-on data (persisted state, e.g. the shared video account) and the app itself. /app is rix
+  # because go2rtc execs stream.sh from there and Node reads the compiled JS.
+  /data/** rw,
+  /app/** rix,
+
+  # Runtime introspection needed by Node/ffmpeg/go2rtc.
+  /proc/** r,
+  /sys/** r,
+}
