@@ -95,10 +95,15 @@ The stream includes **one-way audio** (hear the visitor); two-way (talk-back) is
 ### Door-open on 2Voice models (experimental)
 
 The default door-open path is for **Ipercom** panels (it sends a cloud command). **2Voice** systems
-(model codes `1083/83`, `1760/*`) open the door a different way - by placing a short call to the door
-station and sending an "open" tone. The add-on **auto-detects** your model from the cloud, so 2Voice
-door-open is enabled automatically for a detected 2Voice system - there is no option to set (just like
-Ipercom doors).
+(model codes `1083/83`, `1083/58*`, `1722/58*`, `9854/58*`, `1760/*`) open the door a different way -
+by placing a short call to the door station and sending an "open" tone. The add-on **auto-detects**
+your model from the cloud, so 2Voice door-open is enabled automatically for a detected 2Voice system -
+there is no option to set (just like Ipercom doors).
+
+Some CallMe call-forwarding devices (the 1083/58A family) are not listed by the cloud device API.
+The add-on then builds a 2Voice place from your SIP account, takes the station name from the SIP
+registration census, and opens with a `mac` header instead of `auto_insertion`. Cloud-listed 2Voice
+systems are unchanged.
 
 Any 2Voice entrance on your account appears as a **door `button`**. Pressing it registers your channel
 account, places a silent `auto_insertion` call to the station, sends the door tone, and hangs up (this

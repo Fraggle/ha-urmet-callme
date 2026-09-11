@@ -233,7 +233,11 @@ static LinphoneCall *place_call(LinphoneCore *lc, LinphoneFactory *factory, cons
   linphone_call_params_set_video_direction(p, LinphoneMediaDirectionRecvOnly);
   if (linphone_core_media_encryption_supported(lc, LinphoneMediaEncryptionSRTP))
     linphone_call_params_set_media_encryption(p, LinphoneMediaEncryptionSRTP);
-  linphone_call_params_add_custom_header(p, "auto_insertion", "true");
+  /* Phase-B stations (1083/58A family) want `mac` and reject `auto_insertion` with 486 Busy.
+   * Cloud-listed 2Voice stations want `auto_insertion: true`. The app sends one or the other. */
+  const char *mac = getenv("OPENDOOR_MAC");
+  if (mac && *mac) linphone_call_params_add_custom_header(p, "mac", mac);
+  else linphone_call_params_add_custom_header(p, "auto_insertion", "true");
   LinphoneCall *call = linphone_core_invite_address_with_params(lc, to, p);
   linphone_call_params_unref(p);
   linphone_address_unref(to);
