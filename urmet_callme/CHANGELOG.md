@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.1
+
+- **Fix camera video on some systems** - the image is back on Ubuntu 24.04. The 1.0.0 image moved to
+  Debian, whose newer mediastreamer stack broke the video tap (the camera call connected but no frames
+  reached go2rtc). Door-open/doorbell were unaffected.
+- **Better diagnostics for unsupported models** - when an account returns no entrances, the log now
+  shows the (secret-masked) shape of the cloud device response, so new models can be added.
+
 ## 1.0.0
 
 Initial public release.

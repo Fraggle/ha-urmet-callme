@@ -114,7 +114,10 @@ export class CallMe {
       `SIP account = ${this.instance.username} (pw ${redact(this.instance.password)}) realm ${this.realm}`,
     );
     const data = await cloud.getMyDevices();
-    if (!data.length) throw new Error("no places on this account");
+    if (!data.length)
+      throw new Error(
+        "no places on this account (set log_level: debug and send the 'get_my_devices response (redacted)' line to diagnose this model)",
+      );
     this.places = data.map((d) => new Place(d, this.realm));
     log.info(
       `get_my_devices: ${this.places.length} place(s): ${this.places.map((p) => `${p.id}(${p.name})`).join(", ")}`,

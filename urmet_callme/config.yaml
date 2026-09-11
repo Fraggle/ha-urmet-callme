@@ -1,5 +1,5 @@
 name: Urmet CallMe (Unofficial)
-version: "1.0.0"
+version: "1.0.1"
 slug: urmet_callme
 description: Control your Urmet intercom from Home Assistant
 url: "https://github.com/a-blaho/ha-urmet-callme"
@@ -17,7 +17,7 @@ ingress_port: 8098
 panel_icon: mdi:door-open
 panel_title: Urmet CallMe
 # init: true so tini is PID 1 and reaps the ffmpeg/go2rtc/stream.sh grandchildren we spawn (the image
-# uses a plain debian base, not an S6 base, so we need the Supervisor's init).
+# uses a plain Ubuntu base, not an S6 base, so we need the Supervisor's init).
 init: true
 # Host networking so go2rtc sees the real LAN interface and advertises a REACHABLE WebRTC ICE
 # candidate for video, giving the low-latency direct-UDP path. In bridge mode the WebRTC media has to

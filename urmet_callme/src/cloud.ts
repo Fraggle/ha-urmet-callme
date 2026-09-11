@@ -161,12 +161,26 @@ export class Cloud {
     );
     if (res.status !== 200)
       throw new Error(`get_my_devices HTTP ${res.status}`);
-    const json = (await res.json()) as { data?: PlaceData[] };
+    const json = (await res.json()) as {
+      data?: PlaceData[];
+    } & Record<string, unknown>;
     const data = json.data ?? [];
     // At debug level, log each device's REDACTED shape so the get_my_devices field structure for a
     // given device can be inspected safely (secrets masked).
     for (const dev of data) {
       log.debug(`device shape (redacted): ${JSON.stringify(redactShape(dev))}`);
+    }
+    // Diagnostic for accounts that yield NO places (unsupported model, or devices under a different
+    // envelope key): the per-device log above prints nothing when data[] is empty, so dump the whole
+    // response shape (redacted) + its top-level keys. This is how we learn where a model like the
+    // 1722/58A puts its devices, without exposing any secrets. Ask the user for these two lines.
+    if (!data.length) {
+      log.debug(
+        `get_my_devices returned no data[]; top-level keys: [${Object.keys(json).join(", ")}]`,
+      );
+      log.debug(
+        `get_my_devices response (redacted): ${JSON.stringify(redactShape(json))}`,
+      );
     }
     return data;
   }
