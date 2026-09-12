@@ -32,6 +32,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -285,6 +286,14 @@ typedef struct {
   int nch;
   long bytes;
   int announced; /* logged the PCM format yet? */
+  /* Level diagnostics (per ~1s window): distinguishes "no/silent audio from the panel" (rms 0, or
+   * no buffers at all) from "audio arrives but does not reach the stream" (rms > 0, wrote > 0 but
+   * the listener hears nothing -> the problem is downstream in ffmpeg/go2rtc). See awrite_process. */
+  long win_frames;  /* input buffers this window */
+  long win_dropped; /* buffers dropped on a full FIFO (EAGAIN) this window */
+  long win_samp;    /* samples accumulated this window */
+  double win_sumabs; /* sum of |sample| this window (avg level; no sqrt/-lm needed) */
+  int win_peak;     /* peak |sample| this window */
 } AudioTap;
 
 static void awrite_init(MSFilter *f) {
@@ -322,6 +331,23 @@ static void awrite_process(MSFilter *f) {
   }
   mblk_t *im;
   while ((im = ms_queue_get(f->inputs[0])) != NULL) {
+    {
+      /* Level of THIS buffer (independent of whether the write below succeeds): tells us what the
+       * panel is actually sending. avg/peak 0 with buffers flowing = silence upstream (e.g. audio
+       * paused by the panel); no buffers at all = liblinphone built no audio graph. */
+      size_t alen = msgdsize(im);
+      msgpullup(im, alen);
+      const int16_t *pcm = (const int16_t *)im->b_rptr;
+      size_t nsamp = alen / 2;
+      for (size_t k = 0; k < nsamp; k++) {
+        int v = pcm[k];
+        int a = v < 0 ? -v : v;
+        if (a > s->win_peak) s->win_peak = a;
+        s->win_sumabs += (double)a;
+      }
+      s->win_samp += (long)nsamp;
+      s->win_frames++;
+    }
     if (s->fd >= 0) {
       size_t len = msgdsize(im);
       msgpullup(im, len); /* linearize into one block (one whole set of PCM frames) */
@@ -335,13 +361,29 @@ static void awrite_process(MSFilter *f) {
       if (w == (ssize_t)len) {
         s->bytes += (long)len;
       } else if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
-        /* pipe full or interrupted: drop this buffer (stays frame-aligned) */
+        s->win_dropped++; /* pipe full or interrupted: drop this buffer (stays frame-aligned) */
       } else if (w < 0) {
         close(s->fd); s->fd = -1; /* unexpected error -> reopen next tick */
       }
       /* 0 < w < len can't happen for our small buffers (atomic), so no partial to realign. */
     }
     freemsg(im);
+  }
+  /* Once per ~1s of audio, report the level + write health. Reading this line answers the split
+   * Noemi asked for: peak/avg 0 (or "0 buf") => the panel isn't sending audio to us (e.g. paused);
+   * peak/avg > 0 with total rising and dropped low => audio reaches the FIFO fine and the fault is
+   * downstream (ffmpeg/go2rtc). */
+  if (s->win_samp >= s->rate && s->rate > 0) {
+    long avg = s->win_samp ? (long)(s->win_sumabs / (double)s->win_samp) : 0;
+    fprintf(stderr,
+            "[atap] audio ~1s: %ld buf, avg=%ld peak=%d (of 32768), total=%ldB dropped=%ld\n",
+            s->win_frames, avg, s->win_peak, s->bytes, s->win_dropped);
+    fflush(stderr);
+    s->win_frames = 0;
+    s->win_dropped = 0;
+    s->win_samp = 0;
+    s->win_sumabs = 0;
+    s->win_peak = 0;
   }
 }
 
