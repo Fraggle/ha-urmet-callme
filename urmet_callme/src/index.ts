@@ -241,7 +241,8 @@ async function main() {
   // Single shutdown path (video children first so recv/go2rtc get SIGTERM, then MQTT). One set
   // of handlers avoids the earlier bug where the MQTT handler's process.exit() pre-empted the
   // separately-registered video handler and left recv/go2rtc running.
-  const shutdown = () => {
+  const shutdown = (sig: string) => {
+    log.info(`shutdown (${sig})`);
     try {
       video?.stop();
     } catch {
@@ -264,8 +265,8 @@ async function main() {
     }
     process.exit(0);
   };
-  process.on("SIGTERM", shutdown);
-  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
 
   // maintenance: keepalive + expiry-driven re-register (SIP + doorbell listeners). Each client
   // refreshes when half its REGISTRAR-GRANTED expiry has elapsed (sip.dueForReregister()), not on a

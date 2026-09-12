@@ -192,9 +192,15 @@ static void on_call_state(LinphoneCore *lc, LinphoneCall *call,
      * so Flexisip keeps forking to the listener's binding; it just drops us from this call.) */
     linphone_call_decline(call, LinphoneReasonBusy);
     break;
-  case LinphoneCallStreamsRunning:
+  case LinphoneCallStreamsRunning: {
+    /* Report the NEGOTIATED media, not what we asked for -- a station can still answer with video. */
+    const LinphoneCallParams *cur = linphone_call_get_current_params(call);
+    printf("[opendoor] media up: audio%s\n",
+           (cur && linphone_call_params_video_enabled(cur)) ? "+video" : " only");
+    fflush(stdout);
     g_streams = 1;
     break;
+  }
   case LinphoneCallError: {
     /* DIAGNOSTIC (58A support): print the SIP status the station returned. A `486 Busy Here` here
      * means the station rejected our header (the 58A rejects `auto_insertion`; a cloud-listed
@@ -231,7 +237,15 @@ static long long now_ms(void) {
  * unlock press, before releasing the 2Voice bus if no tone arrives. Overridable via env. */
 #define OPENDOOR_PREWARM_HOLD_MS 15000
 
-/* Place an auto_insertion audio+video call to out_uri. Resets g_streams/g_ended, sets g_call (refed).
+/* Phase-B (1083/58A family) is identified by OPENDOOR_MAC. Those stations accept an audio-only
+ * INVITE with a `mac` header; cloud-listed 2Voice panels 403 an audio-only offer (observed on a
+ * 1760/16) and keep the video graph. */
+static int phase_b(void) {
+  const char *mac = getenv("OPENDOOR_MAC");
+  return mac && *mac;
+}
+
+/* Place an auto_insertion call to out_uri. Resets g_streams/g_ended, sets g_call (refed).
  * Uses the expected offer (UA + SRTP configured on the core). Returns the call or NULL. */
 static LinphoneCall *place_call(LinphoneCore *lc, LinphoneFactory *factory, const char *out_uri) {
   g_streams = 0;
@@ -240,9 +254,15 @@ static LinphoneCall *place_call(LinphoneCore *lc, LinphoneFactory *factory, cons
   if (!to) { fprintf(stderr, "[opendoor] bad OUT uri %s\n", out_uri); return NULL; }
   LinphoneCallParams *p = linphone_core_create_call_params(lc, NULL);
   linphone_call_params_enable_audio(p, TRUE);
-  /* Offer video recvonly (no camera; the m=video line makes the station accept auto_insertion). */
-  linphone_call_params_enable_video(p, TRUE);
-  linphone_call_params_set_video_direction(p, LinphoneMediaDirectionRecvOnly);
+  if (phase_b()) {
+    /* Explicit: the params inherit the core's video activation policy, so "not enabling" video is
+     * not enough to keep the m=video line (and its H.264 graph) out of the offer. */
+    linphone_call_params_enable_video(p, FALSE);
+  } else {
+    /* Offer video recvonly (no camera; the m=video line makes some stations accept auto_insertion). */
+    linphone_call_params_enable_video(p, TRUE);
+    linphone_call_params_set_video_direction(p, LinphoneMediaDirectionRecvOnly);
+  }
   if (linphone_core_media_encryption_supported(lc, LinphoneMediaEncryptionSRTP))
     linphone_call_params_set_media_encryption(p, LinphoneMediaEncryptionSRTP);
   /* Phase-B stations (1083/58A family) want `mac` and reject `auto_insertion` with 486 Busy.
@@ -262,7 +282,8 @@ static LinphoneCall *place_call(LinphoneCore *lc, LinphoneFactory *factory, cons
   if (!call) { fprintf(stderr, "[opendoor] invite failed to start\n"); return NULL; }
   linphone_call_ref(call);
   g_call = call;
-  printf("[opendoor] auto_insertion call placed (audio+video) -> waiting for media\n");
+  printf("[opendoor] call placed, offering %s -> waiting for media\n",
+         phase_b() ? "audio only" : "audio+video");
   fflush(stdout);
   return call;
 }
@@ -474,19 +495,23 @@ int main(int argc, char **argv) {
   /* Use the expected User-Agent -- some Urmet logic keys off it, and the station may gate on it. */
   linphone_core_set_user_agent(lc, "UrmetCallForwarding-Android", NULL);
 
-  /* Offer VIDEO on the door-open call. A 2Voice unit is a video door station and `auto_insertion`
-   * means "insert into the video entry call" -- the call must offer audio+video (H264 42801F),
-   * and an audio-only INVITE gets 403 Forbidden from the panel (observed on a 1760/16). We only
-   * RECEIVE video (recvonly, discarded via the headless MSExtDisplay sink -- same trick as recv.c);
-   * enabling capture+display is required or liblinphone marks the video stream inactive and never
-   * builds the graph, so the offer would carry no m=video line. */
-  linphone_core_enable_video_capture(lc, TRUE);
-  linphone_core_enable_video_display(lc, TRUE);
+  /* Offer VIDEO on the door-open call unless this is a phase-B station (OPENDOOR_MAC). A cloud-listed
+   * 2Voice unit is a video door station and `auto_insertion` means "insert into the video entry call"
+   * -- some panels (observed on a 1760/16) 403 an audio-only INVITE. We only RECEIVE video (recvonly,
+   * discarded via the headless MSExtDisplay sink); enabling capture+display is required or liblinphone
+   * marks the video stream inactive and never builds the graph. Phase-B accepts audio-only (confirmed
+   * on a 1083/58A), so skip the H.264 graph there -- it is unused and expensive on 1 GB hosts. */
+  /* Always the headless sink: if a station starts video anyway, this keeps mediastreamer off the
+   * (non-existent) X display instead of "Could not open display :0". */
   linphone_core_set_video_display_filter(lc, "MSExtDisplay");
+  const int want_video = !phase_b();
+  linphone_core_enable_video_capture(lc, want_video);
+  linphone_core_enable_video_display(lc, want_video);
   LinphoneVideoActivationPolicy *vap =
       linphone_factory_create_video_activation_policy(factory);
-  linphone_video_activation_policy_set_automatically_accept(vap, TRUE);
-  linphone_video_activation_policy_set_automatically_initiate(vap, TRUE); /* we OFFER video */
+  /* Phase-B: refuse video outright, including a station's re-INVITE offering it. */
+  linphone_video_activation_policy_set_automatically_accept(vap, want_video);
+  linphone_video_activation_policy_set_automatically_initiate(vap, want_video);
   linphone_core_set_video_activation_policy(lc, vap);
   linphone_video_activation_policy_unref(vap);
 

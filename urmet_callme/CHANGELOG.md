@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Phase-B door-open is audio-only** - 1083/58A-family stations (the `mac` header path) accept an
+  audio-only unlock INVITE, so the persistent helper no longer builds an H.264 graph that is discarded
+  anyway. Cloud-listed 2Voice keeps the video offer (`auto_insertion`); some of those panels 403
+  audio-only.
+- **Clean shutdowns are logged** - SIGTERM/SIGINT now print the signal, so a stop requested by
+  Supervisor is distinguishable from a crash in the log.
+
 ## 1.0.3
 
 - **2Voice video on the 1083/58A family (experimental)** - the 2Voice video call now dials with the

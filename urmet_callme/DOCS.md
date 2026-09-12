@@ -102,8 +102,9 @@ there is no option to set (just like Ipercom doors).
 
 Some CallMe call-forwarding devices (the 1083/58A family) are not listed by the cloud device API.
 The add-on then builds a 2Voice place from your SIP account, takes the station name from the SIP
-registration census, and opens with a `mac` header instead of `auto_insertion`. Cloud-listed 2Voice
-systems are unchanged.
+registration census, and opens with a `mac` header instead of `auto_insertion`. That unlock call is
+audio-only (no H.264) -- those stations accept it, and it is much cheaper on small hosts. Cloud-listed
+2Voice systems are unchanged (they still get a video offer; some of those panels reject audio-only).
 
 Any 2Voice entrance on your account appears as a **door `button`**. Pressing it registers your channel
 account, places a silent `auto_insertion` call to the station, sends the door tone, and hangs up (this
