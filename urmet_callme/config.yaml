@@ -1,5 +1,5 @@
 name: Urmet CallMe (Local Build)
-version: "1.0.4.local3"
+version: "1.0.4.local4"
 slug: urmet_callme
 description: Control your Urmet intercom from Home Assistant
 url: "https://github.com/Fraggle/ha-urmet-callme"
