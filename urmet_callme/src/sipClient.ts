@@ -131,6 +131,11 @@ export class SipClient {
     callId: string;
   }) => void;
 
+  /** Fires on an inbound `introduction_resp` MESSAGE. Phase-B call-forwarding devices (1083/58A
+   *  family) answer an `introduction_req` (sent to the shared account) with their MAC and a human
+   *  name -- the app's device-discovery for devices the cloud does not list. */
+  onIntroduction?: (info: { mac: string; name: string }) => void;
+
   private closing = false; // set by close() so an intentional teardown doesn't log as an error
 
   constructor(
@@ -458,6 +463,12 @@ export class SipClient {
     try {
       obj = JSON.parse(body);
     } catch {
+      return;
+    }
+    // introduction_resp is unsolicited (a device announcing itself on the shared account), so route
+    // it by type via the hook rather than by id-correlation. Other replies correlate by body id.
+    if (obj.type === "introduction_resp" && this.onIntroduction) {
+      this.onIntroduction({ mac: obj.mac || "", name: obj.name || "" });
       return;
     }
     const cb = this.pendingMsg.get(obj.id);

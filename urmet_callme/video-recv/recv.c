@@ -743,12 +743,18 @@ int main(int argc, char **argv) {
       linphone_call_params_set_video_direction(p, LinphoneMediaDirectionRecvOnly);
       if (linphone_core_media_encryption_supported(lc, LinphoneMediaEncryptionSRTP))
         linphone_call_params_set_media_encryption(p, LinphoneMediaEncryptionSRTP);
-      linphone_call_params_add_custom_header(p, "auto_insertion", "true");
+      /* Header matches the app's camera call (callCCTV), which differs from the door call: a phase-B
+       * 58A station wants the `mac` header (and rejects auto_insertion with 486), while a cloud-listed
+       * 2Voice station gets NO custom header at all -- NOT `auto_insertion` (that's the door path).
+       * RECV_MAC carries the colon-form MAC for phase-B; unset -> cloud-listed -> no header. */
+      const char *mac = getenv("RECV_MAC");
+      if (mac && *mac) linphone_call_params_add_custom_header(p, "mac", mac);
       g_keyframe_seen = 0; /* gate output until this call's first IDR */
       g_call = to ? linphone_core_invite_address_with_params(lc, to, p) : NULL;
       linphone_call_params_unref(p);
       if (to) linphone_address_unref(to);
-      printf("[recv] 2Voice auto_insertion video call placed -> %s\n", g_call_uri);
+      printf("[recv] 2Voice video call placed (header: %s) -> %s\n",
+             (mac && *mac) ? "mac" : "none", g_call_uri);
       fflush(stdout);
     }
     /* Control plane asked us to end the current call (camera switch / viewer closed). Terminate

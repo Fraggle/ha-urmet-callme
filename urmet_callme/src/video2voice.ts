@@ -13,6 +13,7 @@ import { spawn, execFileSync, ChildProcess } from "node:child_process";
 import { writeFileSync, unlinkSync, mkdirSync } from "node:fs";
 import { createServer, Server } from "node:http";
 import { Place } from "./callme.js";
+import { macHeaderOf } from "./door2voice.js";
 import { logger } from "./logger.js";
 import { Go2rtcPorts, webrtcListen } from "./video.js";
 
@@ -120,10 +121,19 @@ export class TwoVoiceVideoService {
     writeFileSync(targetFile, `${cam.fifo}\n${cam.afifo}\n`);
     const dataDir = `/tmp/lp_2v_vid_${i}/`; // unique per camera (shared sqlite corrupts account state)
     mkdirSync(dataDir, { recursive: true });
+    // The camera call's header follows the app's callCCTV, which differs from the door call: a
+    // phase-B 58A station needs the `mac` header (it rejects auto_insertion with 486), while a
+    // cloud-listed station gets NO header (recv omits it) -- auto_insertion is the door path only.
+    // "" here (non-MAC account) -> no RECV_MAC -> recv sends no custom header.
+    const mac = macHeaderOf(cam.place.outgoingUser);
+    log.info(
+      `2Voice video [${i}] ${cam.place.name}: call via ${mac ? `mac header ${mac}` : "no header (cloud-listed camera)"} to station ${cam.place.outgoingUser}`,
+    );
     const recv = spawn("recv", [cam.place.incomingUser, cam.place.incomingPw], {
       env: {
         ...process.env,
         RECV_CALL_URI: `sip:${cam.place.outgoingUser}@${this.realm}`, // OUTGOING auto_insertion target
+        ...(mac ? { RECV_MAC: mac } : {}), // 58A: dial with `mac` instead of `auto_insertion`
         RECV_TARGET_FILE: targetFile, // line 0 = H.264 FIFO, line 1 = PCM FIFO
         RECV_DATA_DIR: dataDir,
         RECV_IDLE_SECONDS: String(RECV_IDLE_SECONDS),

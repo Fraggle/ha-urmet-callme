@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.3
+
+- **2Voice video on the 1083/58A family (experimental)** - the 2Voice video call now dials with the
+  `mac` header, like door-open, so phase-B stations that reject `auto_insertion` (486 Busy) can stream.
+  The panel sends its H.264 on that same call. Video remains off by default (`video: true` to enable).
+- **Device discovery + real names for 1083/58A devices** - on start the add-on now asks the shared
+  account for an introduction (the same request the app sends), and the device answers with its MAC
+  and a human name. That names the place properly and gives its station account directly, rather than
+  only inferring it from the SIP registration census (which stays as a fallback).
+- **Cloud-listed 2Voice camera calls** now send no `auto_insertion` header, matching the app's camera
+  call (`auto_insertion` is the door-open path only). Phase-B keeps the `mac` header.
+
 ## 1.0.2
 
 - **2Voice CallMe call-forwarding devices (1083/58A family)** - accounts whose cloud device list is

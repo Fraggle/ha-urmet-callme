@@ -8,6 +8,10 @@ import { loadStation, saveStation } from "./station.js";
 
 const log = logger("callme");
 
+// How long connect() waits for an introduction_resp before falling back to the SIP census. Short:
+// the census/ring paths still cover a device that answers late (attachIntroduction stays hooked).
+const INTRODUCE_WAIT_MS = 4000;
+
 /** Device family, derived from the raw get_my_devices `uid_type` MODEL code. IPERCOM opens doors
  *  with a cloud open_door_req (pure-Node); 2Voice opens with an in-call DTMF tone (the liblinphone
  *  `opendoor` path). */
@@ -117,6 +121,9 @@ export class CallMe {
   // Ring routing for the synthesized place, which has no channel account of its own and so listens
   // on this.sip. Kept because a reconnect builds a fresh SipClient that must be re-hooked.
   private instanceRing?: { place: Place; onRing: (r: DoorbellRing) => void };
+  // The synthesized place we run introduction discovery for, re-hooked after each connectSip().
+  private introPlace?: Place;
+  private introResolve?: () => void; // resolves the in-flight introduce() wait on the first response
 
   /** Fires when a synthesized place's station account is known (from the SIP census, disk, or a
    *  later ring). The 2Voice helper needs that URI at spawn time. */
@@ -170,9 +177,62 @@ export class CallMe {
     }
     await this.connectSip();
     const synthesized = this.places.find((p) => p.synthesized);
-    if (synthesized && !synthesized.outgoingUser)
-      this.applyStationFromBindings(synthesized);
+    if (synthesized) {
+      // Primary discovery: ask the shared account "who's there?" (introduction_req) -- phase-B
+      // devices answer with their MAC and a human name, exactly like the app. This gives both the
+      // station account AND a real display name, more reliably than inferring the station from the
+      // REGISTER binding census. The census (and a later ring) remain fallbacks.
+      this.introPlace = synthesized;
+      this.attachIntroduction();
+      await this.introduce(synthesized);
+      if (!synthesized.outgoingUser) this.applyStationFromBindings(synthesized);
+    }
     return this;
+  }
+
+  /** Send an introduction_req to our OWN account and wait briefly for the device to answer with its
+   *  MAC + name (see attachIntroduction / onIntroduction). Best-effort: on timeout the caller falls
+   *  back to the SIP census. */
+  private async introduce(place: Place): Promise<void> {
+    const answered = new Promise<void>((resolve) => (this.introResolve = resolve));
+    try {
+      const body = buildBody({
+        typeReq: "introduction_req",
+        channel: place.channel,
+        responseUri: this.responseUri,
+        tokenPassword: place.incomingPw,
+      });
+      // Sent to the shared account itself (this.responseUri); the registrar forks it to the devices.
+      await this.sip.sendCallme(this.responseUri, body, false);
+      log.debug("sent introduction_req; waiting for a device to answer");
+    } catch (e) {
+      log.debug(`introduction_req send failed: ${(e as Error).message}`);
+    }
+    await Promise.race([
+      answered,
+      new Promise<void>((r) => setTimeout(r, INTRODUCE_WAIT_MS)),
+    ]);
+    this.introResolve = undefined;
+  }
+
+  /** Route an inbound introduction_resp to the synthesized place. Re-applied after every
+   *  connectSip() (which replaces this.sip), so a device that announces itself later is still heard. */
+  private attachIntroduction(): void {
+    if (!this.introPlace || !this.sip) return;
+    const place = this.introPlace;
+    this.sip.onIntroduction = ({ mac, name }) => {
+      log.info(
+        `introduction_resp: mac=${mac || "(none)"} name=${name || "(none)"} (place ${place.id})`,
+      );
+      // The station (OUTGOING) account is the MAC written with underscores, same value the door/video
+      // paths key the `mac` header on.
+      if (mac) this.setStation(place, mac.replace(/:/g, "_"), "introduction");
+      if (name && name !== place.name) {
+        log.info(`place ${place.id} name: "${place.name}" -> "${name}"`);
+        place.name = name;
+      }
+      this.introResolve?.();
+    };
   }
 
   /** Device SIP names from the registrar's Contact census. Phones carry push parameters; the
@@ -301,6 +361,7 @@ export class CallMe {
     if (st !== 200) throw new Error(`SIP registration failed (${st})`);
     log.info(`SIP registered as ${this.instance.username} (200 OK)`);
     this.attachInstanceRing();
+    this.attachIntroduction();
   }
 
   close() {

@@ -22,6 +22,18 @@ const RESPAWN_MS = 3000; // auto-restart a helper that died (e.g. registration d
 
 const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_]/g, "_");
 
+/** The station's MAC in `mac`-header form (colons), when its account IS a MAC. Those are the "phase B"
+ *  devices (the 1083/58A family): the cloud does not list them, the app builds their account from the
+ *  MAC it learns at introduction, and it dials them with a `mac` header instead of `auto_insertion:
+ *  true` - they answer 486 Busy to the latter. A cloud-listed station has a generated account name, no
+ *  MAC shape, and keeps the auto_insertion header. Returns "" for a non-MAC account. Shared by the
+ *  door-open (opendoor) and the 2Voice video (recv) paths so both dial a 58A the same way. */
+export function macHeaderOf(user: string): string {
+  return /^([0-9a-f]{2}_){5}[0-9a-f]{2}$/i.test(user)
+    ? user.replace(/_/g, ":")
+    : "";
+}
+
 /** An openable 2Voice relay (a door and a gate per place; see doors()). */
 export interface TwoVoiceDoor {
   placeId: string;
@@ -106,18 +118,6 @@ export class TwoVoiceService {
     return `sip:${p.outgoingUser}@${p.realm}`;
   }
 
-  /** The station's MAC, when its account IS a MAC. Those are the "phase B" devices (the 1083/58A
-   *  family): the cloud does not list them, the app builds their account from the MAC it learns at
-   *  introduction, and it dials them with a `mac` header instead of `auto_insertion: true` - they
-   *  answer 486 Busy to the latter. A cloud-listed station has a generated account name, no MAC
-   *  shape, and keeps the auto_insertion header. */
-  private macHeaderOf(p: Place): string {
-    const u = p.outgoingUser;
-    return /^([0-9a-f]{2}_){5}[0-9a-f]{2}$/i.test(u)
-      ? u.replace(/_/g, ":")
-      : "";
-  }
-
   private spawn(placeId: string): void {
     if (this.stopping) return;
     const h = this.helpers.get(placeId);
@@ -125,7 +125,7 @@ export class TwoVoiceService {
     const p = h.place;
     if (!p.outgoingUser) return; // station still unknown; stationLearned() spawns us later
     const outUri = this.stationUri(p);
-    const mac = this.macHeaderOf(p);
+    const mac = macHeaderOf(p.outgoingUser);
     // DIAGNOSTIC: log EXACTLY which door-open header this station will get. `mac` is the 58A path;
     // `auto_insertion` is cloud-listed 2Voice. If a 58A ends up on auto_insertion (because its
     // station account wasn't MAC-shaped), the station answers 486 and the door won't open -- pair
