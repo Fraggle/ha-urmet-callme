@@ -1,5 +1,5 @@
 name: Urmet CallMe (Local Build)
-version: "1.0.4.local1"
+version: "1.0.4.local2"
 slug: urmet_callme
 description: Control your Urmet intercom from Home Assistant
 url: "https://github.com/Fraggle/ha-urmet-callme"
@@ -18,8 +18,9 @@ ingress: true
 ingress_port: 8098
 panel_icon: mdi:door-open
 panel_title: Urmet CallMe
-# Restart after a crash (e.g. OOM / exit 137). Ingress always answers 200 on this port.
-watchdog: http://[HOST]:8098/
+# No `watchdog:` health URL: under host_network the [HOST] placeholder does not resolve to where
+# the ingress server binds, so Supervisor reads every poll as unhealthy and stops the add-on (which
+# then SIGKILLs as exit 137). The add-on Info tab's Watchdog toggle still restarts it after a crash.
 # init: true so tini is PID 1 and reaps the ffmpeg/go2rtc/stream.sh grandchildren we spawn (the image
 # uses a plain Ubuntu base, not an S6 base, so we need the Supervisor's init).
 init: true

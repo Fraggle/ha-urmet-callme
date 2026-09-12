@@ -6,8 +6,8 @@
   audio-only unlock INVITE, so the persistent helper no longer builds an H.264 graph that is discarded
   anyway. Cloud-listed 2Voice keeps the video offer (`auto_insertion`); some of those panels 403
   audio-only.
-- **Watchdog** - Supervisor restarts the add-on if the process dies (e.g. OOM / exit 137). Clean
-  SIGTERM/SIGINT shutdowns are logged so they are distinguishable from a kill.
+- **Clean shutdowns are logged** - SIGTERM/SIGINT now print the signal, so a stop requested by
+  Supervisor is distinguishable from a crash in the log.
 
 ## 1.0.3
 
