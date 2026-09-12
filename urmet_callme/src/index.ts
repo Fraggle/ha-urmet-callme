@@ -1,6 +1,7 @@
 // Add-on entry point: load config, connect CallMe, bridge to MQTT (HA discovery),
 // and keep the SIP registration alive.
 import { readFileSync } from "node:fs";
+import { freemem, totalmem } from "node:os";
 import { CallMe, Door } from "./callme.js";
 import { TwoVoiceDoor, TwoVoiceService } from "./door2voice.js";
 import { startIngressServer } from "./ingress.js";
@@ -268,6 +269,11 @@ async function main() {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("SIGINT", () => shutdown("SIGINT"));
 
+  // DIAGNOSTIC (this fork): we are being SIGKILLed on a 1 GB Pi with nothing in the add-on log.
+  // Print our own footprint next to the host's free memory and the container's cgroup limit, so the
+  // log distinguishes "we grow until the kernel kills us" from "the host ran out around us".
+  startMemoryLog();
+
   // maintenance: keepalive + expiry-driven re-register (SIP + doorbell listeners). Each client
   // refreshes when half its REGISTRAR-GRANTED expiry has elapsed (sip.dueForReregister()), not on a
   // fixed timer - so a lifetime Flexisip caps below our assumption can't silently lapse.
@@ -292,6 +298,39 @@ async function main() {
       busy = false;
     }
   }, 25000);
+}
+
+/** Bytes from a cgroup file, or 0 when absent/unlimited. */
+function cgroupBytes(path: string): number {
+  try {
+    const v = readFileSync(path, "utf8").trim();
+    if (v === "max") return 0;
+    const n = Number(v);
+    // cgroup v1 reports "no limit" as a huge sentinel rather than omitting the file.
+    return Number.isFinite(n) && n < 1e15 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function startMemoryLog(everyMs = 15000): void {
+  const mb = (b: number) => Math.round(b / 1048576);
+  const limit =
+    cgroupBytes("/sys/fs/cgroup/memory.max") ||
+    cgroupBytes("/sys/fs/cgroup/memory/memory.limit_in_bytes");
+  log.info(
+    `memory: host ${mb(totalmem())}MB total, container limit ${limit ? mb(limit) + "MB" : "none"}`,
+  );
+  setInterval(() => {
+    const m = process.memoryUsage();
+    const used = cgroupBytes("/sys/fs/cgroup/memory.current");
+    log.info(
+      `memory: rss=${mb(m.rss)}MB heap=${mb(m.heapUsed)}/${mb(m.heapTotal)}MB ` +
+        `external=${mb(m.external)}MB` +
+        (used ? ` cgroup=${mb(used)}MB` : "") +
+        ` host free=${mb(freemem())}MB`,
+    );
+  }, everyMs).unref();
 }
 
 main().catch((e) => {
