@@ -1,13 +1,17 @@
 # Changelog
 
-## Unreleased
+## 1.0.4
 
 - **Phase-B door-open is audio-only** - 1083/58A-family stations (the `mac` header path) accept an
   audio-only unlock INVITE, so the persistent helper no longer builds an H.264 graph that is discarded
-  anyway. Cloud-listed 2Voice keeps the video offer (`auto_insertion`); some of those panels 403
-  audio-only.
+  anyway. This markedly lowers memory use on small hosts (it was OOM-killing the add-on on a 1 GB
+  Raspberry Pi 3). Cloud-listed 2Voice keeps the video offer (`auto_insertion`); some of those panels
+  403 audio-only.
 - **Clean shutdowns are logged** - SIGTERM/SIGINT now print the signal, so a stop requested by
   Supervisor is distinguishable from a crash in the log.
+- **Audio-level diagnostics for the camera stream** (`log_level: debug`) - the PCM tap now logs a
+  once-per-second line with the buffer count, average/peak sample level, bytes written and dropped
+  count, to pin down one-way-audio issues (silent input from the panel vs. audio not reaching go2rtc).
 
 ## 1.0.3
 
