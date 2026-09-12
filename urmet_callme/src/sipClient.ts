@@ -495,6 +495,13 @@ export class SipClient {
       else if (/^\d+$/.test(hexp)) granted = parseInt(hexp, 10);
       this.grantedExpires = granted;
       this.lastRegisterMs = Date.now();
+      // DIAGNOSTIC: is OUR binding still in the registrar's response? On the synthesized 58A place
+      // the opendoor helper registers this SAME account on its own connection; if its +sip.instance
+      // collides with ours it would REPLACE our binding (killing doorbell + door commands) rather
+      // than add one. A "MISSING" here after the helper spawns is the smoking gun for that.
+      log.debug(
+        `our binding ${line ? "present" : "MISSING"} in the REGISTER 200 response`,
+      );
       // Census of the OTHER bindings on this account (ours excluded by its instance uuid). A CallMe
       // account is shared, so this is where a call-forwarding device shows itself even when the HTTP
       // API lists no devices at all.

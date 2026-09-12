@@ -1,11 +1,15 @@
 # Changelog
 
-## Unreleased
+## 1.0.2
 
 - **2Voice CallMe call-forwarding devices (1083/58A family)** - accounts whose cloud device list is
   empty now get a 2Voice place built from the instance SIP account. The station is taken from the SIP
   registration census and persisted, and door/gate open uses the `mac` header those devices require.
   Cloud-listed Ipercom and 2Voice systems keep the existing `auto_insertion` / `open_door_req` paths.
+- **More diagnostics on this path** (visible with `log_level: debug`) - the SIP binding census, where
+  a station was learned (census / ring / disk) and whether its account is MAC-shaped, which door-open
+  header goes out (`mac` vs `auto_insertion`), and the SIP status a station returns on rejection - so
+  the new-device path can be verified from a log.
 
 ## 1.0.1
 

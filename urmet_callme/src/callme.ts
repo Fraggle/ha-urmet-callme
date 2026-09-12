@@ -178,10 +178,19 @@ export class CallMe {
   /** Device SIP names from the registrar's Contact census. Phones carry push parameters; the
    *  call-forwarding device does not, and its instance UUID node is its MAC / account name. */
   private deviceCandidates(): string[] {
+    const bindings = this.sip.bindings();
+    // DIAGNOSTIC (58A support): dump the census so a tester's debug log shows whether the
+    // call-forwarding device even appears, and what account name we derive from it. If the device is
+    // registered but this prints 0 bindings, the registrar folded them onto one Contact line (parse
+    // gap); if it prints a binding but "-> (no mac node)", the account name isn't the instance MAC.
+    log.debug(`REGISTER census: ${bindings.length} other binding(s) on this account`);
     const users = new Set<string>();
-    for (const b of this.sip.bindings()) {
-      if (b.push) continue;
+    for (const b of bindings) {
       const user = macUserOfInstance(b.instanceId);
+      log.debug(
+        `  binding: push=${b.push} instance=${b.instanceId ? "yes" : "no"} -> ${b.push ? "(phone, skipped)" : user || "(no mac node)"}`,
+      );
+      if (b.push) continue;
       if (user && user !== this.instance.username) users.add(user);
     }
     return [...users];
@@ -201,7 +210,7 @@ export class CallMe {
       log.warn(
         `multiple device bindings (${users.join(", ")}); using ${users[0]}`,
       );
-    this.setStation(place, users[0]);
+    this.setStation(place, users[0], "census");
   }
 
   /** A place standing in for a device the cloud didn't list, driven by the instance SIP account.
@@ -241,7 +250,7 @@ export class CallMe {
       log.info(
         `DOORBELL RING on the instance account (place ${place.id}): ${caller} (call ${callId})`,
       );
-      this.setStation(place, uriUser(from));
+      this.setStation(place, uriUser(from), "ring");
       try {
         onRing({ placeId: place.id, from, caller });
       } catch (e) {
@@ -250,15 +259,20 @@ export class CallMe {
     };
   }
 
-  /** Record the station SIP user and persist it. */
-  private setStation(place: Place, user: string): void {
+  /** Record the station SIP user and persist it. `source` (census/ring/disk) is logged so we can
+   *  see, from a tester's log, WHERE a station came from and whether a later ring changes it. The
+   *  `mac-shaped` flag matters because door2voice sends the `mac` header only for a MAC-shaped
+   *  account (58A) and `auto_insertion` otherwise -- if a ring overwrites a MAC-shaped station with
+   *  a differently-shaped one, the header choice flips (a suspected failure mode we're verifying). */
+  private setStation(place: Place, user: string, source: string): void {
     if (!user || user === this.instance.username) return;
     if (place.outgoingUser === user) return;
     const previous = place.outgoingUser;
     place.outgoingUser = user;
     saveStation(place.id, user);
+    const macShaped = /^([0-9a-f]{2}_){5}[0-9a-f]{2}$/i.test(user);
     log.info(
-      `station ${user} for place ${place.id}` +
+      `station ${user} (mac-shaped=${macShaped}) for place ${place.id} from ${source}` +
         (previous ? ` (was ${previous})` : ""),
     );
     try {

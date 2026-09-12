@@ -195,8 +195,20 @@ static void on_call_state(LinphoneCore *lc, LinphoneCall *call,
   case LinphoneCallStreamsRunning:
     g_streams = 1;
     break;
+  case LinphoneCallError: {
+    /* DIAGNOSTIC (58A support): print the SIP status the station returned. A `486 Busy Here` here
+     * means the station rejected our header (the 58A rejects `auto_insertion`; a cloud-listed
+     * station rejects `mac`) -- this is how we tell "wrong header" apart from "no media / timeout". */
+    const LinphoneErrorInfo *ei = linphone_call_get_error_info(call);
+    printf("[opendoor] call error: %d %s (%s)\n",
+           ei ? linphone_error_info_get_protocol_code(ei) : 0,
+           (ei && linphone_error_info_get_phrase(ei)) ? linphone_error_info_get_phrase(ei) : "",
+           message ? message : "");
+    fflush(stdout);
+    if (g_call == call) g_ended = 1;
+    break;
+  }
   case LinphoneCallEnd:
-  case LinphoneCallError:
   case LinphoneCallReleased:
     printf("[opendoor] call finished: %s\n", message ? message : "");
     fflush(stdout);
@@ -238,6 +250,12 @@ static LinphoneCall *place_call(LinphoneCore *lc, LinphoneFactory *factory, cons
   const char *mac = getenv("OPENDOOR_MAC");
   if (mac && *mac) linphone_call_params_add_custom_header(p, "mac", mac);
   else linphone_call_params_add_custom_header(p, "auto_insertion", "true");
+  /* DIAGNOSTIC (58A support): record which header we actually put on the INVITE, so a tester's log
+   * confirms the mac-vs-auto_insertion choice reaching the wire (paired with the call-error code
+   * below when the station rejects it). */
+  printf("[opendoor] outgoing header: %s\n",
+         (mac && *mac) ? "mac" : "auto_insertion");
+  fflush(stdout);
   LinphoneCall *call = linphone_core_invite_address_with_params(lc, to, p);
   linphone_call_params_unref(p);
   linphone_address_unref(to);

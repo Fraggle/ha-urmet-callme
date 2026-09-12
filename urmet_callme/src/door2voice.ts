@@ -126,6 +126,13 @@ export class TwoVoiceService {
     if (!p.outgoingUser) return; // station still unknown; stationLearned() spawns us later
     const outUri = this.stationUri(p);
     const mac = this.macHeaderOf(p);
+    // DIAGNOSTIC: log EXACTLY which door-open header this station will get. `mac` is the 58A path;
+    // `auto_insertion` is cloud-listed 2Voice. If a 58A ends up on auto_insertion (because its
+    // station account wasn't MAC-shaped), the station answers 486 and the door won't open -- pair
+    // this line with opendoor's own "outgoing header" + call-error-code lines to confirm.
+    log.info(
+      `2Voice place ${p.id} (${p.name}): door-open via ${mac ? `mac header ${mac}` : "auto_insertion"} to station ${p.outgoingUser}`,
+    );
     const dataDir = `/tmp/lp_2v_${sanitize(p.id)}/`;
     try {
       mkdirSync(dataDir, { recursive: true });
