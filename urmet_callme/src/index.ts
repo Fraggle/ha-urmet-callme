@@ -159,9 +159,17 @@ async function main() {
     );
     twoVoiceDoors = twoVoice.doors();
     twoVoice.start(); // spawn a persistent, pre-registered opendoor per place (fast opens)
+    callme.onStationLearned = (p) => twoVoice?.stationLearned(p.id);
     log.info(
-      `2Voice door-open enabled for ${twoVoiceDoors.length} place(s): ${twoVoicePlaces.map((p) => `${p.id}(${p.name})`).join(", ")}`,
+      `2Voice door-open enabled for ${twoVoicePlaces.length} place(s), ${twoVoiceDoors.length} relay(s): ` +
+        twoVoicePlaces.map((p) => `${p.id}(${p.name})`).join(", "),
     );
+    const awaiting = twoVoicePlaces.filter((p) => !p.outgoingUser);
+    if (awaiting.length)
+      log.warn(
+        `place(s) ${awaiting.map((p) => p.id).join(", ")} have no station yet ` +
+          "(call-forwarding device not in the SIP census)",
+      );
   }
 
   let bridge: MqttBridge | undefined;

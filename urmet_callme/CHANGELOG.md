@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **2Voice CallMe call-forwarding devices (1083/58A family)** - accounts whose cloud device list is
+  empty now get a 2Voice place built from the instance SIP account. The station is taken from the SIP
+  registration census and persisted, and door/gate open uses the `mac` header those devices require.
+  Cloud-listed Ipercom and 2Voice systems keep the existing `auto_insertion` / `open_door_req` paths.
+
 ## 1.0.1
 
 - **Fix camera video on some systems** - the image is back on Ubuntu 24.04. The 1.0.0 image moved to

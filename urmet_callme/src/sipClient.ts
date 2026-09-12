@@ -17,6 +17,12 @@ export function callerName(from: string): string {
   return name ? `${name} (${uri})` : uri;
 }
 
+/** User part of a SIP header's URI: `"Panel" <sip:abc@host>` -> `abc`. On a panel's INVITE this is
+ *  the calling station's account - the 2Voice door-open target. */
+export function uriUser(header: string): string {
+  return /sip:([^@>;]+)@/i.exec(header)?.[1] || "";
+}
+
 /** Via + Record-Route lines verbatim, in original order - a response MUST echo every
  *  Via the request carried (the proxy added its own) or it can't be routed back. */
 function copyRoutingHeaders(rawHead: string): string[] {
@@ -78,6 +84,15 @@ interface SipResponse {
   body: string;
 }
 
+/** One Contact binding the registrar holds for our account. A CallMe account is shared: the user's
+ *  phones register on it and so does a call-forwarding device, so the binding list is a census of
+ *  what else lives on the account (see SipClient.bindings). */
+export interface SipBinding {
+  contact: string; // the Contact URI
+  instanceId: string; // +sip.instance UUID ("" when the binding carries none)
+  push: boolean; // carries push-notification parameters, i.e. a phone rather than a wired device
+}
+
 export class SipClient {
   private socket!: tls.TLSSocket;
   private localIp = "";
@@ -96,6 +111,7 @@ export class SipClient {
   // below it, and refreshing on a stale fixed interval could then let the binding lapse.
   private grantedExpires = 0; // seconds granted at the last successful REGISTER
   private lastRegisterMs = 0; // when that REGISTER landed (0 = never registered)
+  private otherBindings: SipBinding[] = []; // everything else registered on this account
   private recvBuf = Buffer.alloc(0);
   private callIdReg = rnd(16);
   private fromTag = rnd(12);
@@ -479,6 +495,18 @@ export class SipClient {
       else if (/^\d+$/.test(hexp)) granted = parseInt(hexp, 10);
       this.grantedExpires = granted;
       this.lastRegisterMs = Date.now();
+      // Census of the OTHER bindings on this account (ours excluded by its instance uuid). A CallMe
+      // account is shared, so this is where a call-forwarding device shows itself even when the HTTP
+      // API lists no devices at all.
+      this.otherBindings = (res.headers["_raw"] || "")
+        .split("\r\n")
+        .filter((l) => /^contact:/i.test(l) && !l.includes(uuid))
+        .map((l) => ({
+          contact: /<([^>]+)>/.exec(l)?.[1] || "",
+          instanceId:
+            /\+sip\.instance="?<?urn:uuid:([^">]+)>?"?/.exec(l)?.[1] || "",
+          push: /pn-provider=|pn-prid=/i.test(l),
+        }));
       const m = line && /pub-gruu="([^"]+)"/.exec(line);
       if (m) this.pubGruu = m[1];
       log.info(
@@ -495,6 +523,11 @@ export class SipClient {
     if (!this.lastRegisterMs) return true;
     const halfMs = Math.max(60, this.grantedExpires / 2) * 1000;
     return Date.now() - this.lastRegisterMs >= halfMs;
+  }
+
+  /** Bindings the registrar reported for this account at the last REGISTER, ours excluded. */
+  bindings(): SipBinding[] {
+    return this.otherBindings;
   }
 
   /** Send a CallMe MESSAGE (JSON body); optionally await the reply correlated by body.id. */

@@ -5,6 +5,7 @@ import mqtt, { MqttClient } from "mqtt";
 import { CallMe, Door, DoorbellRing } from "./callme.js";
 import { TwoVoiceDoor, TwoVoiceService } from "./door2voice.js";
 import { logger } from "./logger.js";
+import { uriUser } from "./sipClient.js";
 
 const log = logger("mqtt");
 
@@ -12,7 +13,6 @@ const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_]/g, "_");
 // Topological codes use `#` wildcards in the device list but arrive as `_` in the same
 // positions in the panel's SIP From. Canonicalize (# and _ → #) so they compare equal.
 const canonTopo = (s: string) => (s || "").replace(/[_#]/g, "#");
-const uriUser = (from: string) => /sip:([^@>;]+)@/i.exec(from)?.[1] || "";
 
 interface Relay {
   uid: string;

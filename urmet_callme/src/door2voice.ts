@@ -38,6 +38,7 @@ interface PendingOpen {
 interface Helper {
   place: Place;
   child?: ChildProcess;
+  outUri?: string; // station URI the live child was spawned with (opendoor takes it as argv)
   buf: string; // stdout line-assembly buffer
   // FIFO of in-flight opens awaiting their RESULT line. A queue (not a single slot) so rapid
   // consecutive presses all reach opendoor -- it queues the tones and sends them at StreamsRunning /
@@ -69,15 +70,52 @@ export class TwoVoiceService {
   /** Spawn one persistent, pre-registered opendoor per 2Voice place. Call once at startup. */
   start(): void {
     for (const p of this.places) {
-      if (!p.incomingUser || !p.incomingPw || !p.outgoingUser) {
+      if (!p.incomingUser || !p.incomingPw) {
         log.warn(
-          `2Voice place ${p.id} has no channel/OUT account; door-open unavailable`,
+          `2Voice place ${p.id} has no channel account; door-open unavailable`,
         );
         continue;
       }
       this.helpers.set(p.id, { place: p, buf: "", pending: [] });
+      if (!p.outgoingUser) {
+        log.warn(
+          `2Voice place ${p.id} has no station account yet; waiting for the device to register`,
+        );
+        continue;
+      }
       this.spawn(p.id);
     }
+  }
+
+  /** Start (or restart) the helper now that the station URI is known. opendoor fixes the URI at spawn. */
+  stationLearned(placeId: string): void {
+    if (this.stopping) return;
+    const h = this.helpers.get(placeId);
+    if (!h || !h.place.outgoingUser) return;
+    if (h.child) {
+      if (h.outUri === this.stationUri(h.place)) return;
+      log.info(`2Voice station for ${placeId} changed; restarting its helper`);
+      h.child.removeAllListeners("exit");
+      h.child.kill("SIGTERM");
+      h.child = undefined;
+    }
+    this.spawn(placeId);
+  }
+
+  private stationUri(p: Place): string {
+    return `sip:${p.outgoingUser}@${p.realm}`;
+  }
+
+  /** The station's MAC, when its account IS a MAC. Those are the "phase B" devices (the 1083/58A
+   *  family): the cloud does not list them, the app builds their account from the MAC it learns at
+   *  introduction, and it dials them with a `mac` header instead of `auto_insertion: true` - they
+   *  answer 486 Busy to the latter. A cloud-listed station has a generated account name, no MAC
+   *  shape, and keeps the auto_insertion header. */
+  private macHeaderOf(p: Place): string {
+    const u = p.outgoingUser;
+    return /^([0-9a-f]{2}_){5}[0-9a-f]{2}$/i.test(u)
+      ? u.replace(/_/g, ":")
+      : "";
   }
 
   private spawn(placeId: string): void {
@@ -85,7 +123,9 @@ export class TwoVoiceService {
     const h = this.helpers.get(placeId);
     if (!h) return;
     const p = h.place;
-    const outUri = `sip:${p.outgoingUser}@${p.realm}`;
+    if (!p.outgoingUser) return; // station still unknown; stationLearned() spawns us later
+    const outUri = this.stationUri(p);
+    const mac = this.macHeaderOf(p);
     const dataDir = `/tmp/lp_2v_${sanitize(p.id)}/`;
     try {
       mkdirSync(dataDir, { recursive: true });
@@ -100,10 +140,12 @@ export class TwoVoiceService {
         OPENDOOR_DATA_DIR: dataDir,
         OPENDOOR_KEEPALIVE_MS: String(this.keepaliveMs),
         OPENDOOR_PREWARM_HOLD_MS: String(this.prewarmHoldMs),
+        ...(mac ? { OPENDOOR_MAC: mac } : {}),
       },
       stdio: ["pipe", "pipe", "inherit"],
     });
     h.child = child;
+    h.outUri = outUri;
     h.buf = "";
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (d: string) => this.onStdout(placeId, d));
@@ -159,7 +201,11 @@ export class TwoVoiceService {
     if (!h) return Promise.reject(new Error(`unknown 2Voice place ${placeId}`));
     if (!h.child || !h.child.stdin?.writable)
       return Promise.reject(
-        new Error(`2Voice helper for ${placeId} not ready (registering?)`),
+        new Error(
+          h.place.outgoingUser
+            ? `2Voice helper for ${placeId} not ready (registering?)`
+            : `station for ${placeId} not known yet`,
+        ),
       );
     const digit = DIGIT[kind];
     log.info(`opening ${kind} on 2Voice place ${placeId} (${h.place.name})`);
@@ -187,13 +233,14 @@ export class TwoVoiceService {
    *  NOW, with no tone, so the unlock press moments later rides an already-established call (instant).
    *  Fire-and-forget - no RESULT is expected; the helper releases the bus on its
    *  own if no unlock follows. No-op if the helper isn't ready or the place isn't a 2Voice door. */
-  prewarm(placeId: string): void {
+  prewarm(placeId: string): boolean {
     const h = this.helpers.get(placeId);
-    if (!h || !h.child || !h.child.stdin?.writable) return;
+    if (!h || !h.child || !h.child.stdin?.writable) return false;
     log.info(
       `pre-warming 2Voice call for ${placeId} (${h.place.name}) on ring`,
     );
     h.child.stdin.write("W\n");
+    return true;
   }
 
   stop(): void {

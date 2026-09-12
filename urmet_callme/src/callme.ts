@@ -3,7 +3,8 @@
 import { Cloud, InstanceAccount, NO_ACCOUNT, PlaceData } from "./cloud.js";
 import { logger, redact } from "./logger.js";
 import { buildBody, randId } from "./query.js";
-import { SipClient, callerName } from "./sipClient.js";
+import { SipClient, callerName, uriUser } from "./sipClient.js";
+import { loadStation, saveStation } from "./station.js";
 
 const log = logger("callme");
 
@@ -12,9 +13,12 @@ const log = logger("callme");
  *  `opendoor` path). */
 export type Family = "ipercom" | "twovoice" | "unknown";
 export function familyOf(uidType: string): Family {
-  const u = (uidType || "").toLowerCase();
+  const u = (uidType || "").toLowerCase().replace(/\s+/g, "");
   if (u === "1060") return "ipercom";
   if (u === "1083/83" || u.startsWith("1760/")) return "twovoice";
+  // The 2Voice CallMe call-forwarding devices (1083/58A, 1722/58A, 9854/58). Matched on the model
+  // prefix because the trailing letter varies between catalogue/firmware revisions.
+  if (/^(1083\/58|1722\/58|9854\/58)/.test(u)) return "twovoice";
   return "unknown";
 }
 
@@ -55,6 +59,12 @@ export class Place {
   id: string;
   name: string;
   uidType: string; // raw device model code from get_my_devices ("1060" = IPERCOM, "1760/16" = 2Voice)
+  // Set when the family can't be read from uid_type - i.e. on the place synthesized from the
+  // instance account, where the cloud described no device at all (see CallMe.instancePlace).
+  familyOverride?: Family;
+  // True for that synthesized place. Its station (OUTGOING) account is the device's MAC-shaped SIP
+  // name, recovered from the registrar's binding census (or restored from disk).
+  synthesized = false;
   constructor(
     d: PlaceData,
     public realm: string,
@@ -79,7 +89,7 @@ export class Place {
   }
   /** Device family (ipercom / twovoice / unknown), from uid_type. Selects the door-open path. */
   get family(): Family {
-    return familyOf(this.uidType);
+    return this.familyOverride ?? familyOf(this.uidType);
   }
 }
 
@@ -87,6 +97,13 @@ export interface DoorbellRing {
   placeId: string;
   from: string; // raw From header of the panel's INVITE
   caller: string; // human-readable caller (name/uri)
+}
+
+/** The SIP account an Urmet call-forwarding device registers as: the 12-hex node at the end of its
+ *  RFC 5626 instance UUID (`…-001ee00338f8`) is the MAC, written `00_1E_E0_03_38_F8`. */
+function macUserOfInstance(instanceId: string): string {
+  const node = /-([0-9a-f]{12})$/i.exec(instanceId)?.[1];
+  return node ? node.toUpperCase().replace(/(..)(?=.)/g, "$1_") : "";
 }
 
 export class CallMe {
@@ -97,6 +114,13 @@ export class CallMe {
   responseUri!: string;
   private gateways = new Map<string, string>();
   private doorbellClients: { sip: SipClient; place: Place }[] = [];
+  // Ring routing for the synthesized place, which has no channel account of its own and so listens
+  // on this.sip. Kept because a reconnect builds a fresh SipClient that must be re-hooked.
+  private instanceRing?: { place: Place; onRing: (r: DoorbellRing) => void };
+
+  /** Fires when a synthesized place's station account is known (from the SIP census, disk, or a
+   *  later ring). The 2Voice helper needs that URI at spawn time. */
+  onStationLearned?: (place: Place) => void;
 
   constructor(
     private email: string,
@@ -114,11 +138,24 @@ export class CallMe {
       `SIP account = ${this.instance.username} (pw ${redact(this.instance.password)}) realm ${this.realm}`,
     );
     const data = await cloud.getMyDevices();
-    if (!data.length)
-      throw new Error(
-        "no places on this account (set log_level: debug and send the 'get_my_devices response (redacted)' line to diagnose this model)",
-      );
-    this.places = data.map((d) => new Place(d, this.realm));
+    if (data.length) {
+      this.places = data.map((d) => new Place(d, this.realm));
+    } else {
+      // Phase-B CallMe devices (1083/58A family) are not listed by the cloud. The 2Voice door-open
+      // path only needs this account plus the station URI, which comes from the SIP registration
+      // census (or a previous run's store). Reuse the object on reconnect so the helper's Place
+      // reference stays valid.
+      const existing = this.places.find((p) => p.synthesized);
+      if (existing) {
+        existing.incomingUser = this.instance.username;
+        existing.incomingPw = this.instance.password;
+      } else {
+        log.warn(
+          "get_my_devices listed no devices; using a 2Voice place built from the instance SIP account",
+        );
+      }
+      this.places = [existing ?? this.instancePlace()];
+    }
     log.info(
       `get_my_devices: ${this.places.length} place(s): ${this.places.map((p) => `${p.id}(${p.name})`).join(", ")}`,
     );
@@ -132,7 +169,103 @@ export class CallMe {
       );
     }
     await this.connectSip();
+    const synthesized = this.places.find((p) => p.synthesized);
+    if (synthesized && !synthesized.outgoingUser)
+      this.applyStationFromBindings(synthesized);
     return this;
+  }
+
+  /** Device SIP names from the registrar's Contact census. Phones carry push parameters; the
+   *  call-forwarding device does not, and its instance UUID node is its MAC / account name. */
+  private deviceCandidates(): string[] {
+    const users = new Set<string>();
+    for (const b of this.sip.bindings()) {
+      if (b.push) continue;
+      const user = macUserOfInstance(b.instanceId);
+      if (user && user !== this.instance.username) users.add(user);
+    }
+    return [...users];
+  }
+
+  /** Set the station from the current SIP bindings. No-op when none are present (device offline);
+   *  a later doorbell ring can still teach it via setStation. */
+  private applyStationFromBindings(place: Place): void {
+    const users = this.deviceCandidates();
+    if (!users.length) {
+      log.warn(
+        "no call-forwarding device in this account's SIP bindings; door-open waits until it registers",
+      );
+      return;
+    }
+    if (users.length > 1)
+      log.warn(
+        `multiple device bindings (${users.join(", ")}); using ${users[0]}`,
+      );
+    this.setStation(place, users[0]);
+  }
+
+  /** A place standing in for a device the cloud didn't list, driven by the instance SIP account.
+   *  Channel 1 is unused (2Voice never builds a cloud request body). The station is restored from
+   *  disk when a previous run already found it. */
+  private instancePlace(): Place {
+    const p = new Place(
+      {
+        channel_number: "1",
+        channel_id: this.instance.username,
+        credentials: this.instance.password,
+        out_credentials_username: "",
+        device_uid: "instance",
+        device_name: "CallMe",
+      },
+      this.realm,
+    );
+    p.familyOverride = "twovoice";
+    p.synthesized = true;
+    const saved = loadStation(p.id);
+    if (saved) {
+      p.outgoingUser = saved;
+      log.info(`restored learned station ${saved} for place ${p.id}`);
+    }
+    return p;
+  }
+
+  /** Route rings arriving on the INSTANCE account to the doorbell handler. Re-applied after every
+   *  connectSip(), which replaces this.sip. */
+  private attachInstanceRing(): void {
+    const ctx = this.instanceRing;
+    if (!ctx || !this.sip) return;
+    const { place, onRing } = ctx;
+    this.sip.onInvite = ({ headers, callId }) => {
+      const from = headers["from"] || "";
+      const caller = callerName(from);
+      log.info(
+        `DOORBELL RING on the instance account (place ${place.id}): ${caller} (call ${callId})`,
+      );
+      this.setStation(place, uriUser(from));
+      try {
+        onRing({ placeId: place.id, from, caller });
+      } catch (e) {
+        log.error(`doorbell handler error: ${(e as Error).message}`);
+      }
+    };
+  }
+
+  /** Record the station SIP user and persist it. */
+  private setStation(place: Place, user: string): void {
+    if (!user || user === this.instance.username) return;
+    if (place.outgoingUser === user) return;
+    const previous = place.outgoingUser;
+    place.outgoingUser = user;
+    saveStation(place.id, user);
+    log.info(
+      `station ${user} for place ${place.id}` +
+        (previous ? ` (was ${previous})` : ""),
+    );
+    try {
+      this.onStationLearned?.(place);
+    } catch (e) {
+      log.error(`station handler error: ${(e as Error).message}`);
+    }
   }
 
   /** SIP register. */
@@ -153,6 +286,7 @@ export class CallMe {
     const st = await this.sip.register();
     if (st !== 200) throw new Error(`SIP registration failed (${st})`);
     log.info(`SIP registered as ${this.instance.username} (200 OK)`);
+    this.attachInstanceRing();
   }
 
   close() {
@@ -166,6 +300,17 @@ export class CallMe {
    *  We ring but never answer (no media) and never decline, so the phone is undisturbed. */
   async startDoorbell(onRing: (r: DoorbellRing) => void): Promise<void> {
     for (const place of this.places) {
+      if (place.synthesized) {
+        // This place IS the instance account, which this.sip already registers. Registering it a
+        // second time on its own connection would REPLACE that binding rather than add one (the
+        // +sip.instance id is derived from the username), so tap the existing client instead.
+        this.instanceRing = { place, onRing };
+        this.attachInstanceRing();
+        log.info(
+          `doorbell listening on the instance account ${place.incomingUser} (place ${place.id})`,
+        );
+        continue;
+      }
       if (!place.incomingUser || !place.incomingPw) {
         log.warn(
           `place ${place.id} has no channel account; doorbell unavailable`,
@@ -232,7 +377,12 @@ export class CallMe {
   }
 
   private place(id?: string): Place {
-    if (!id) return this.places[0];
+    if (!id) {
+      // Guard the default: with no places at all, every caller below would otherwise fail on a
+      // property of undefined rather than saying what's wrong.
+      if (!this.places.length) throw new Error("no places on this account");
+      return this.places[0];
+    }
     const p = this.places.find((x) => x.id === id);
     if (!p) throw new Error(`unknown place ${id}`);
     return p;
