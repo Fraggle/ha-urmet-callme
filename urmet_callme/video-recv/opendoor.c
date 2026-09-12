@@ -192,9 +192,15 @@ static void on_call_state(LinphoneCore *lc, LinphoneCall *call,
      * so Flexisip keeps forking to the listener's binding; it just drops us from this call.) */
     linphone_call_decline(call, LinphoneReasonBusy);
     break;
-  case LinphoneCallStreamsRunning:
+  case LinphoneCallStreamsRunning: {
+    /* Report the NEGOTIATED media, not what we asked for -- a station can still answer with video. */
+    const LinphoneCallParams *cur = linphone_call_get_current_params(call);
+    printf("[opendoor] media up: audio%s\n",
+           (cur && linphone_call_params_video_enabled(cur)) ? "+video" : " only");
+    fflush(stdout);
     g_streams = 1;
     break;
+  }
   case LinphoneCallError: {
     /* DIAGNOSTIC (58A support): print the SIP status the station returned. A `486 Busy Here` here
      * means the station rejected our header (the 58A rejects `auto_insertion`; a cloud-listed
@@ -248,7 +254,11 @@ static LinphoneCall *place_call(LinphoneCore *lc, LinphoneFactory *factory, cons
   if (!to) { fprintf(stderr, "[opendoor] bad OUT uri %s\n", out_uri); return NULL; }
   LinphoneCallParams *p = linphone_core_create_call_params(lc, NULL);
   linphone_call_params_enable_audio(p, TRUE);
-  if (!phase_b()) {
+  if (phase_b()) {
+    /* Explicit: the params inherit the core's video activation policy, so "not enabling" video is
+     * not enough to keep the m=video line (and its H.264 graph) out of the offer. */
+    linphone_call_params_enable_video(p, FALSE);
+  } else {
     /* Offer video recvonly (no camera; the m=video line makes some stations accept auto_insertion). */
     linphone_call_params_enable_video(p, TRUE);
     linphone_call_params_set_video_direction(p, LinphoneMediaDirectionRecvOnly);
@@ -272,8 +282,8 @@ static LinphoneCall *place_call(LinphoneCore *lc, LinphoneFactory *factory, cons
   if (!call) { fprintf(stderr, "[opendoor] invite failed to start\n"); return NULL; }
   linphone_call_ref(call);
   g_call = call;
-  printf("[opendoor] auto_insertion call placed (%s) -> waiting for media\n",
-         phase_b() ? "audio-only" : "audio+video");
+  printf("[opendoor] call placed, offering %s -> waiting for media\n",
+         phase_b() ? "audio only" : "audio+video");
   fflush(stdout);
   return call;
 }
@@ -491,17 +501,19 @@ int main(int argc, char **argv) {
    * discarded via the headless MSExtDisplay sink); enabling capture+display is required or liblinphone
    * marks the video stream inactive and never builds the graph. Phase-B accepts audio-only (confirmed
    * on a 1083/58A), so skip the H.264 graph there -- it is unused and expensive on 1 GB hosts. */
-  if (!phase_b()) {
-    linphone_core_enable_video_capture(lc, TRUE);
-    linphone_core_enable_video_display(lc, TRUE);
-    linphone_core_set_video_display_filter(lc, "MSExtDisplay");
-    LinphoneVideoActivationPolicy *vap =
-        linphone_factory_create_video_activation_policy(factory);
-    linphone_video_activation_policy_set_automatically_accept(vap, TRUE);
-    linphone_video_activation_policy_set_automatically_initiate(vap, TRUE); /* we OFFER video */
-    linphone_core_set_video_activation_policy(lc, vap);
-    linphone_video_activation_policy_unref(vap);
-  }
+  /* Always the headless sink: if a station starts video anyway, this keeps mediastreamer off the
+   * (non-existent) X display instead of "Could not open display :0". */
+  linphone_core_set_video_display_filter(lc, "MSExtDisplay");
+  const int want_video = !phase_b();
+  linphone_core_enable_video_capture(lc, want_video);
+  linphone_core_enable_video_display(lc, want_video);
+  LinphoneVideoActivationPolicy *vap =
+      linphone_factory_create_video_activation_policy(factory);
+  /* Phase-B: refuse video outright, including a station's re-INVITE offering it. */
+  linphone_video_activation_policy_set_automatically_accept(vap, want_video);
+  linphone_video_activation_policy_set_automatically_initiate(vap, want_video);
+  linphone_core_set_video_activation_policy(lc, vap);
+  linphone_video_activation_policy_unref(vap);
 
   /* DTMF as SIP INFO, not RFC2833 (use_info=1, use_rfc2833=0) -- what the station expects for the
    * door-open tone. */
