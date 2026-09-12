@@ -18,6 +18,8 @@ on:
   push:
     tags:
       - "v*"
+    branches:
+      - ha-local # this fork: build the test image on every push
   workflow_dispatch:
 
 permissions:
@@ -46,6 +48,9 @@ jobs:
         with:
           architectures: '["amd64", "aarch64"]'
           image-name: addon-urmet-callme
+          # GHCR repository names must be lowercase; github.repository_owner (the action default)
+          # keeps the owner's original case, which buildx rejects as an invalid tag.
+          registry-prefix: ghcr.io/fraggle
 
   build:
     name: Build ${{ matrix.arch }}

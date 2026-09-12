@@ -1,9 +1,11 @@
-name: Urmet CallMe (Unofficial)
-version: "1.0.3"
+name: Urmet CallMe (Local Build)
+version: "1.0.4.local1"
 slug: urmet_callme
 description: Control your Urmet intercom from Home Assistant
-url: "https://github.com/a-blaho/ha-urmet-callme"
-image: "ghcr.io/a-blaho/{arch}-addon-urmet-callme"
+url: "https://github.com/Fraggle/ha-urmet-callme"
+# This fork's own prebuilt images (GitHub Actions -> GHCR), so Supervisor pulls instead of compiling
+# on the Pi. The PR to upstream keeps the ghcr.io/a-blaho image.
+image: "ghcr.io/fraggle/{arch}-addon-urmet-callme"
 arch:
   - aarch64
   - amd64

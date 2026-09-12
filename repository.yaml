@@ -1,3 +1,3 @@
-name: Urmet CallMe (Unofficial)
-url: "https://github.com/a-blaho/ha-urmet-callme"
-maintainer: Adam Blahovic
+name: Urmet CallMe (Fraggle fork, local build)
+url: "https://github.com/Fraggle/ha-urmet-callme"
+maintainer: Fraggle (fork of Adam Blahovic's add-on)
